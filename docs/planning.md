@@ -22,9 +22,12 @@ A **local MCP (Model Context Protocol) server** written in Rust that:
 | Tool spawning | Always out-of-process |
 | Per-tool resource config | No — policy lives on the key |
 | Enforcement model | Key ceiling ∩ Tool needs = actual child grant |
-| Layer 2 sandboxing | Phase 1, not future |
+| Layer 2 sandboxing | Phase 1 — Linux: landlock+seccomp; Windows: AppContainer |
 | Safety rails | Rate limits, timeouts, resource caps — configurable |
-| Human-in-the-loop | `confirm = true` on individual rules; always-on local confirm server |
+| Human-in-the-loop | `confirm = true`; session approvals to prevent fatigue |
+| Child environment | Clean by default; env grants are the whitelist |
+| Authz explain mode | Dev-mode only; returns policy diff on denial |
+| SSE disconnect | Kill child on disconnect (default); re-attach via request_id |
 | First utilities | After framework is reviewed and stable |
 
 ---
@@ -135,6 +138,26 @@ Deny rules are **evaluated before grants** and always win:
 - Grant `filesystem /workspace/**  rw`
 - Deny  `filesystem /workspace/.git/**  w`  ← specific carve-out
 
+### Authz Explain Mode
+
+When `dev_mode = true` in `[server]`, denial responses include a structured
+policy diff to aid tool developers:
+
+```json
+{
+  "error": "Unauthorized",
+  "explain": {
+    "requested": [{"type": "filesystem", "path": "/etc/hosts", "perm": "w"}],
+    "granted":   [{"type": "filesystem", "path": "/workspace/**", "perm": "rw"}],
+    "denied":    [{"type": "filesystem", "path": "/etc/hosts", "perm": "w",
+                   "reason": "no matching grant for path"}]
+  }
+}
+```
+
+**`dev_mode` must never be enabled in production.** It reveals policy structure
+that an attacker could use to probe the authorization surface. Default: `false`.
+
 ### Human-in-the-Loop Gate
 
 Individual rules can require explicit user confirmation before execution:
@@ -213,6 +236,12 @@ perm        = ["read"]   # GET, HEAD only
 
 ### 5. `environment`
 
+Child processes start with a **clean environment** by default. Only a minimal
+safe baseline is inherited (`PATH`, `TERM`, `LANG`, `HOME`). Every additional
+variable requires an explicit `environment` grant — making these grants the
+effective whitelist rather than a nice-to-have. This is the primary mitigation
+for transitive credential leakage (e.g., `~/.ssh/config`, `~/.aws/credentials`).
+
 ```toml
 [[keys.my_agent.rules]]
 effect      = "grant"
@@ -262,14 +291,19 @@ perm   = ["read"]
 
 ### 9. `registry` *(Windows-specific)*
 
-Forward slashes are normalized to backslashes at parse time to avoid
-the common double-backslash TOML pitfall.
+Two normalizations are applied at parse time before any glob match:
+1. **Forward slashes** → backslashes (avoids double-backslash TOML pitfall)
+2. **Short-form hive aliases** → canonical long form:
+   `HKCU` → `HKEY_CURRENT_USER`, `HKLM` → `HKEY_LOCAL_MACHINE`, etc.
+
+This ensures a rule written for `HKCU/...` cannot be bypassed by a tool
+requesting `HKEY_CURRENT_USER/...`.
 
 ```toml
 [[keys.my_agent.rules]]
 effect = "grant"
 type   = "registry"
-path   = "HKCU/Software/MyApp/**"   # forward slashes accepted
+path   = "HKCU/Software/MyApp/**"   # forward slashes + short alias both accepted
 perm   = ["read", "traverse"]
 ```
 
@@ -289,25 +323,36 @@ The pre-spawn authz check (`resolve_resources` → policy evaluation) is a
 tool can lie in `resolve_resources`. OS-level enforcement makes the sandbox
 real, regardless of the tool's declared intent.
 
-| Platform | Mechanism |
-|---|---|
-| Linux | `landlock` (filesystem), `seccomp` (syscall filter), network namespaces |
-| Windows | Job Objects, restricted token, ACL-based filesystem restrictions |
+| Platform | Mechanism | Notes |
+|---|---|---|
+| Linux | `landlock` (filesystem), `seccomp` (syscall filter), network namespaces | Mature, composable |
+| Windows | **AppContainer** isolation | Preferred over restricted tokens + ACL manipulation, which is brittle. AppContainer provides true filesystem and network virtualization without requiring a separate low-privilege user account or on-the-fly ACL injection. |
 
 The child process is spawned with an environment and OS-level restrictions
 derived from `actual_grant`. It **physically cannot** access resources outside
 that grant, regardless of what it attempts.
 
+### Environment Stripping
+
+Before spawning any child process, the server builds a **clean environment**:
+
+1. Start with an empty environment
+2. Add the safe baseline: `PATH`, `TERM`, `LANG`, `HOME` (configurable)
+3. Apply the calling key's `environment` grants — only explicitly granted
+   vars (matched by `var_pattern` with `inject` permission) are added
+
+This prevents transitive credential leakage. A tool spawning `git` cannot
+pick up `~/.ssh/config` or `~/.aws/credentials` unless those vars/paths
+are explicitly granted to the key.
+
 ### Transitive Resource Access
 
-> **Unresolved.** When a spawned process (e.g., `git`) itself accesses
-> resources transitively (e.g., reads `.git/config` → references a remote),
-> the server cannot intercept those accesses at the argument level.
->
-> **Interim stance**: Layer 2 sandboxing is the primary mitigation. The child
-> process's network and filesystem access are restricted to `actual_grant`,
-> so transitive accesses that fall outside the grant are blocked at the OS.
-> Tools must document their transitive behaviour as part of their spec.
+> **Mitigated (not fully solved).** Environment stripping removes the most
+> common transitive leakage vector. Layer 2 OS sandboxing restricts filesystem
+> and network access to `actual_grant`. Tools that need genuinely transitive
+> access (e.g., `git push` which calls `ssh`) must have the required network
+> grants explicitly, ensuring the operator is aware of the full access chain.
+> Per-tool documentation must describe transitive behaviour.
 
 ### Orphaned Process Reaper
 
@@ -518,17 +563,21 @@ transport     = "stdio"       # "stdio" | "http" | "both"
 # Auto-generated and persisted on first run if left empty.
 # Used to sign confirm tokens. Set explicitly to keep tokens valid across restarts.
 server_secret = ""
+# Expose policy diffs in denial responses. NEVER enable in production.
+dev_mode      = false
 
 [server.http]
-cors_origins = ["http://localhost:*"]   # strict allowlist for browser agents
-# origin header validated on every request
+cors_origins        = ["http://localhost:*"]
+on_disconnect       = "kill"   # "kill" | "detach"
+reattach_grace_secs = 30
 
 [tools]
 dir = "./tools"   # path to script tool definition directory
 
 [sandbox]
-enabled  = true     # disable only if platform support is unavailable
-strategy = "auto"   # "auto" | "landlock" (Linux) | "job_object" (Windows)
+enabled      = true     # disable only if platform support is unavailable
+strategy     = "auto"   # "auto" | "landlock" (Linux) | "app_container" (Windows)
+env_baseline = ["PATH", "TERM", "LANG", "HOME"]  # vars always passed to child
 
 [audit]
 enabled = true
@@ -704,6 +753,24 @@ config immediately after the swap.
 - Strict CORS: `cors_origins` allowlist + `Origin` header validation on every
   request (prevents ambient authority attacks from browser-hosted agents)
 
+#### SSE Disconnect Policy
+
+If an agent's SSE connection drops while a tool is running:
+
+- **Default (`on_disconnect = "kill"`)**: child process is killed immediately.
+  Prevents zombie resource consumption. Correct for most tools.
+- **`on_disconnect = "detach"`**: child continues running. The agent may
+  re-attach within `reattach_grace_secs` using the original `request_id`
+  to resume the SSE stream. After the grace period, if no re-attach occurs,
+  the child is killed and the result is discarded.
+
+```toml
+[server.http]
+cors_origins         = ["http://localhost:*"]
+on_disconnect        = "kill"   # "kill" | "detach"
+reattach_grace_secs  = 30       # only used when on_disconnect = "detach"
+```
+
 ---
 
 ## Confirm Server
@@ -740,12 +807,19 @@ Browser renders approval page:
   Resource:   filesystem  /workspace/src/main.rs
   Permission: w
   [⏱ 28s remaining]
-  [ APPROVE ]   [ DENY ]
+
+  [diff preview if tool provided one]
+  - old line
+  + new line
+
+  [ APPROVE ONCE ]  [ APPROVE 5 min ]  [ APPROVE SESSION ]  [ DENY ]
         |
         v
 User clicks → POST /confirm/<token>/approve  (or /deny)
+  Body: { "scope": "once" | "minutes:5" | "session" }
         |
         v
+Server records session approval if scope != "once"
 Server unblocks the pending request
   → approved: continue to spawn
   → denied:   return 403, audit log entry
@@ -754,13 +828,44 @@ Server unblocks the pending request
 TTL expires with no response → auto-deny + audit log entry
 ```
 
+### Session Approvals
+
+To prevent confirm fatigue on repetitive workflows, approvals can be scoped
+beyond a single invocation:
+
+| Scope | Behaviour |
+|---|---|
+| `once` | This invocation only (default) |
+| `minutes:N` | All matching invocations for N minutes |
+| `session` | Until server restart or config reload |
+
+Session approvals are keyed on `(key_id, tool_name, resource_pattern, perm)` —
+if any of those change, the cached approval does not apply.
+They are stored in memory only; they do not persist across restarts.
+
+```toml
+[ui.confirm]
+timeout_secs             = 30
+session_approval_options = [5, 30, 0]   # minutes; 0 = session
+```
+
+### Diff Preview
+
+Tools can optionally provide a `preview` payload in their response to
+`resolve_resources()`. If present, the confirm UI renders it as a unified diff
+before the approve/deny buttons. Approving "add a comment to line 10" is
+much safer UX than approving "write to main.rs".
+
+The `preview` field is informational — it does not affect enforcement.
+
 ### Security Properties
 
 - **Localhost-only** — confirm server binds `127.0.0.1` exclusively; not reachable from the network
 - **One-time tokens** — each token is valid for exactly one approve/deny; replayed tokens are rejected
 - **HMAC-signed** — tokens cannot be forged without the server secret
 - **Auto-deny on expiry** — unanswered requests fail closed, not open
-- **Pending queue** — multiple concurrent confirm requests are queued and each gets its own page; the UI shows all pending items
+- **Pending queue** — multiple concurrent confirm requests are queued; the UI lists all pending items
+- **PIN-gated admin** — config editing and key management require `ui.auth.pin`; confirm flow is separate and does not expose admin capabilities
 
 ---
 
