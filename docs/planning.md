@@ -18,6 +18,9 @@ A **local MCP (Model Context Protocol) server** written in Rust that:
 | Audit log | On by default; configurable and optional |
 | Hot reload | Yes — validate on change, enforce only if valid |
 | MCP transport | stdio (default/local) + HTTP/SSE (remote, opt-in) |
+| Permission model | Unix-style `r/w/x` bit flags |
+| Tool spawning | Always out-of-process |
+| Per-tool resource policy | No — "access is access" (key policy only) |
 | First utilities | After framework is reviewed and stable |
 
 ---
@@ -37,7 +40,50 @@ Each agent caller is identified by a **named key**. When a request comes in:
 
 ---
 
+## Permission Model: `r/w/x` Bits
+
+Permissions are represented as Unix-style bit flags on every resource rule.
+In TOML, they are written as a compact string. Only include the bits you want to grant.
+
+| String | Bits | Meaning |
+|---|---|---|
+| `"r"` | 100 | read only |
+| `"w"` | 010 | write only |
+| `"x"` | 001 | execute only |
+| `"rw"` | 110 | read + write |
+| `"rx"` | 101 | read + execute |
+| `"rwx"` | 111 | all permissions |
+
+Internally represented as a `u8` bitfield using the `bitflags!` macro.
+
+### Semantics Per Resource Type
+
+| Resource | `r` | `w` | `x` |
+|---|---|---|---|
+| `filesystem` | read content, list dir | create / write / modify / delete | traverse dir, execute file |
+| `program` | capture stdout/stderr | write to stdin | spawn / execute |
+| `network` | receive data | send data | open a connection |
+| `http` | GET, HEAD | POST, PUT, PATCH, DELETE | — (not applicable) |
+| `environment` | read var value | set var in child process | inherit var into child |
+| `secret` | read value | update / rotate | inject into child process env |
+| `registry` | read values | write / create / delete values | enumerate / traverse subkeys |
+| `process` | read info / status | write to stdin | signal / kill |
+
+> `tool` (meta-authorization) has no permission bits — it is grant/deny only.
+
+---
+
 ## Authorization Model
+
+### "Access Is Access"
+
+The policy lives on the **key**, not on individual tools. If a key has `r` on
+`/workspace/**`, then any tool may read files under that path on behalf of that
+key. There is no second layer of per-tool resource policy.
+
+Tools declare what resources they will touch for a given invocation. The authz
+layer checks that list against the key's policy. If it passes, the tool runs —
+in a restricted out-of-process environment derived from those same grants.
 
 ### Evaluation Order
 
@@ -45,33 +91,36 @@ Each agent caller is identified by a **named key**. When a request comes in:
 Request arrives
     |
     v
-1. Key resolution          — unknown key → immediate reject
-2. Tool grant check        — coarse gate, checked first
-3. Deny rule evaluation    — any matching deny → reject (overrides grants)
-4. Grant rule evaluation   — any matching grant → allow
-5. Default deny            — no matching grant → reject
+1. Key resolution        — unknown key → immediate reject
+2. Tool grant check      — no tool grant → reject (coarse gate)
+3. resolve_resources()   — tool maps args → Vec<ResourceRequest>
+4. Deny rule scan        — any deny match → reject (overrides grants)
+5. Grant rule scan       — all resources covered by grants? → allow : reject
+6. Spawn child process   — environment scoped to granted resources only
+    |
+    v
+Audit log (key, tool, resources, decision, outcome, timestamp)
 ```
 
-Deny rules are **evaluated before grants** and always win. This lets you do things like:
-- Grant `filesystem /** read` (broad)
-- Deny  `filesystem /etc/** read` (specific carve-out)
+Deny rules are **evaluated before grants** and always win. This lets you do
+things like:
+- Grant `filesystem /workspace/**  rw`  (broad)
+- Deny  `filesystem /workspace/.git/**  w`  (specific carve-out)
 
 ### Rule Structure
-
-Each rule is either a `grant` or `deny`, with a resource type and associated constraints.
 
 ```toml
 [[keys.my_agent.rules]]
 effect = "deny"
-type = "filesystem"
-path = "/etc/**"
-ops = ["read", "write", "delete"]
+type  = "filesystem"
+path  = "/etc/**"
+perm  = "rwx"
 
 [[keys.my_agent.rules]]
 effect = "grant"
-type = "filesystem"
-path = "/workspace/**"
-ops = ["read", "write", "create"]
+type  = "filesystem"
+path  = "/workspace/**"
+perm  = "rw"
 ```
 
 ---
@@ -79,183 +128,186 @@ ops = ["read", "write", "create"]
 ## Authorization Resource Types
 
 ### 1. `filesystem`
-Path glob(s) + allowed operations.
-
-Operations: `read`, `write`, `delete`, `list`, `create`
 
 ```toml
 [[keys.my_agent.rules]]
 effect = "grant"
-type = "filesystem"
-path = "/home/user/project/**"
-ops = ["read", "write", "list"]
+type   = "filesystem"
+path   = "/home/user/project/**"
+perm   = "rw"
 ```
+
+Glob patterns on `path`. The `x` bit on a directory means traverse/enter;
+on a file it means execute.
 
 ---
 
 ### 2. `program`
-Which executables the key can invoke.
-
-Operations: `execute`
 
 ```toml
 [[keys.my_agent.rules]]
-effect = "grant"
-type = "program"
+effect     = "grant"
+type       = "program"
 executable = "git"
+perm       = "x"    # can spawn; add "r" to capture output, "w" to write stdin
 ```
 
-> **See Tool Isolation section** — program authorization is only meaningful when combined with enforcement.
+`executable` is matched against the resolved binary name (not full path).
+All process spawning is out-of-process; the child's environment is derived
+from the key's full set of grants.
 
 ---
 
 ### 3. `network`
-Host/IP + port + protocol for outbound connections.
-
-Operations: `connect`
 
 ```toml
 [[keys.my_agent.rules]]
-effect = "grant"
-type = "network"
-host = "api.github.com"
-ports = [443]
+effect   = "grant"
+type     = "network"
+host     = "api.github.com"
+ports    = [443]
 protocol = "https"
+perm     = "rw"   # r = receive, w = send, x = open connection
 ```
 
 ---
 
 ### 4. `http`
-URL patterns + HTTP methods. More granular than `network`.
+
+More granular than `network`. `r` = safe methods (GET, HEAD);
+`w` = mutating methods (POST, PUT, PATCH, DELETE). `x` is not used.
 
 ```toml
 [[keys.my_agent.rules]]
-effect = "grant"
-type = "http"
+effect      = "grant"
+type        = "http"
 url_pattern = "https://api.github.com/repos/**"
-methods = ["GET", "POST"]
+perm        = "r"   # GET/HEAD only
 ```
 
 ---
 
 ### 5. `environment`
-Which env vars can be read or injected into child processes.
-
-Operations: `read`, `write`
 
 ```toml
 [[keys.my_agent.rules]]
-effect = "grant"
-type = "environment"
+effect      = "grant"
+type        = "environment"
 var_pattern = "MY_APP_*"
-ops = ["read"]
+perm        = "rx"  # read value + inherit into child process
 ```
 
 ---
 
 ### 6. `process`
-Signal/kill permissions by process name pattern.
-
-Operations: `signal`, `kill`
 
 ```toml
 [[keys.my_agent.rules]]
-effect = "grant"
-type = "process"
+effect       = "grant"
+type         = "process"
 name_pattern = "my_service*"
-ops = ["signal"]
+perm         = "rx"  # read info + signal/kill
 ```
 
 ---
 
 ### 7. `tool`
-Meta-authorization — which MCP tools the key may call at all.
-This is the **first gate**, checked before any resource rules.
+
+Meta-authorization. No permission bits — grant/deny only. This is the
+**first gate**, checked before anything else.
 
 ```toml
 [[keys.my_agent.rules]]
 effect = "grant"
-type = "tool"
-name = "read_file"  # or "*" for all tools
+type   = "tool"
+name   = "read_file"   # or "*" for all tools
 ```
 
 ---
 
 ### 8. `secret`
-Named server-side credentials a tool may retrieve.
-
-Operations: `read`
 
 ```toml
 [[keys.my_agent.rules]]
 effect = "grant"
-type = "secret"
-name = "github_pat"
-ops = ["read"]
+type   = "secret"
+name   = "github_pat"
+perm   = "r"
 ```
 
 ---
 
 ### 9. `registry` *(Windows-specific)*
-Registry key path patterns.
-
-Operations: `read`, `write`, `delete`
 
 ```toml
 [[keys.my_agent.rules]]
 effect = "grant"
-type = "registry"
-path = "HKCU\\Software\\MyApp\\**"
-ops = ["read"]
+type   = "registry"
+path   = "HKCU\\Software\\MyApp\\**"
+perm   = "rx"  # read values + enumerate subkeys
 ```
 
 ---
 
-## ⚠ The Tool Isolation Problem
+## Tool Isolation
 
-This is the deepest design challenge in the project.
+### Always Out-of-Process
 
-### The Core Tension
+Every tool that interacts with system resources spawns a child process.
+The server never executes privileged operations in-process. This gives us:
+- A clear boundary for what the authz layer needs to control
+- A place to insert OS-level restrictions (Layer 2, future)
+- Clean separation: the server process only runs authz + dispatch logic
 
-Authorization checks are only meaningful if the server can actually **enforce** them — not just validate arguments before execution. A tool that receives granted arguments and then does something unexpected (e.g., traverses symlinks, spawns sub-processes, makes network calls) defeats the policy.
+### Pre-Spawn Authorization
 
-Pattern matching on arguments is **soft enforcement**. The argument might look valid but the underlying system call might not be.
+Before any child is spawned:
+1. The tool's `resolve_resources(args)` is called in-proc
+2. It returns the exact resources this invocation will touch
+3. The authz layer evaluates them against the key's deny/grant rules
+4. If all clear, the child is spawned in a restricted environment derived from
+   the granted permissions (restricted PATH, explicit env vars, etc.)
 
-### Principle: Tools Must Be Simple and Atomic
+### Transitive Resource Access
 
-Each tool should:
-- Touch **exactly one resource type**
-- Have a **fully declared resource contract** (what it will access, in what mode)
-- Do **no implicit side effects** beyond its declaration
+> **Unresolved.** When a spawned process (e.g., `git`) itself accesses
+> resources transitively (e.g., reads `.git/config` which references a remote),
+> the server has no portable way to intercept or validate those accesses before
+> they happen. Portably prompting the user mid-execution is also not practical.
+>
+> **Interim stance**: tools that spawn sub-processes must be scoped tightly
+> enough that transitive access is predictable. Document the transitive behaviour
+> as part of each tool's spec. Revisit with OS-level sandboxing (Layer 2).
 
-A tool like `shell_exec(cmd: String)` is fundamentally unsafe because:
-- It can access any resource type
-- Its resource contract is unbounded
-- Arguments cannot be reliably validated before execution
+### Layer 2: OS-Level Sandboxing (Future)
 
-Preferred model: `run_git(args: Vec<String>)` — fixed executable, declared resource types, auditable argument space.
+- Linux: `seccomp` + `namespaces` (restrict syscalls, filesystem view, network)
+- Windows: Job Objects + restricted token
+- The child process literally cannot access what it hasn't been granted,
+  regardless of what it attempts. This supersedes the soft pre-spawn check.
 
-### Tool Resource Contract (Trait Extension)
+---
 
-Each tool statically declares its resource footprint as part of the trait:
+## McpTool Trait
 
 ```rust
 pub trait McpTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
+
+    /// JSON Schema for the tool's arguments.
     fn schema(&self) -> serde_json::Value;
 
-    /// Statically declare what resource types this tool may access.
-    /// Used for coarse pre-registration validation and documentation.
-    fn resource_types(&self) -> &[ResourceType];
-
-    /// Given concrete args, return the exact resources this invocation
-    /// will access. Called before execute(); authz checks this list.
+    /// Given concrete args, return every resource this invocation will touch.
+    /// Called before execute(). Authz checks this list against key policy.
+    /// Tools must be honest here — this is the pre-spawn authorization gate.
     fn resolve_resources(
         &self,
         args: &serde_json::Value,
     ) -> Result<Vec<ResourceRequest>, ToolError>;
 
+    /// Execute the tool. By the time this is called, authz has already passed.
+    /// Implementations should spawn an out-of-process child for any system access.
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -264,30 +316,12 @@ pub trait McpTool: Send + Sync {
 }
 ```
 
-`resolve_resources()` is called **before** `execute()`. The authz layer checks every `ResourceRequest` against the key's policy. If any request is denied, execution never happens.
+Adding a utility:
+1. Create `src/tools/my_tool.rs`
+2. Implement `McpTool`
+3. Register in `src/tools/mod.rs`
 
-### Enforcement Layers
-
-**Layer 1 — Argument validation (soft, always on)**
-- `resolve_resources()` extracts the concrete resources from args
-- Authz evaluates each against deny/grant rules
-- Insufficient for tools that can do unbounded things
-
-**Layer 2 — OS-level sandboxing (hard, future)**
-- Wrap tool execution in a restricted process environment
-- Linux: `seccomp` + `namespaces` (restrict syscalls, filesystem view, network)
-- Windows: Job Objects + restricted token
-- This is the "virtual environment" concept — the tool process literally cannot access what it hasn't been granted, regardless of what it tries
-
-**Current approach**: Layer 1 only. Tools are trusted Rust code in-process. The policy is enforced by the server before invoking execute(), but the tool itself is not sandboxed.
-
-**Future**: When tools can spawn external processes (e.g., `run_git`), those processes should be spawned inside a constrained environment derived from the key's policy.
-
-### Open Sub-Questions on Isolation
-
-- [ ] Should tools that spawn processes always do so out-of-process with a restricted env, even in the MVP?
-- [ ] How do we handle tools that need transitive resource access (e.g., `git` reading `.git/config` which references a remote)?
-- [ ] Is per-tool sandboxing config (`[tools.run_git] sandbox = true`) the right knob?
+No macros or codegen required.
 
 ---
 
@@ -295,60 +329,58 @@ pub trait McpTool: Send + Sync {
 
 ```toml
 [server]
-host = "127.0.0.1"
-port = 3000          # used when transport = "http"
-transport = "stdio"  # "stdio" | "http" | "both"
+host      = "127.0.0.1"
+port      = 3000          # used when transport includes "http"
+transport = "stdio"       # "stdio" | "http" | "both"
 
 [audit]
 enabled = true
-output = "stdout"   # "stdout" | "file"
-path = "audit.log"  # used when output = "file"
+output  = "stdout"        # "stdout" | "file"
+path    = "audit.log"     # used when output = "file"
 
 # -- Keys --
 
 [keys.ci_agent]
 description = "CI pipeline agent"
-token = "sk_live_abc123..."
+token       = "sk_live_abc123..."
 
-  # Coarse gate: can call any tool
   [[keys.ci_agent.rules]]
   effect = "grant"
-  type = "tool"
-  name = "*"
+  type   = "tool"
+  name   = "*"
 
-  # Broad filesystem grant for workspace
   [[keys.ci_agent.rules]]
   effect = "grant"
-  type = "filesystem"
-  path = "/workspace/**"
-  ops = ["read", "write", "create"]
+  type   = "filesystem"
+  path   = "/workspace/**"
+  perm   = "rw"
 
-  # Carve out: cannot touch .git internals
   [[keys.ci_agent.rules]]
   effect = "deny"
-  type = "filesystem"
-  path = "/workspace/.git/**"
-  ops = ["write", "delete"]
+  type   = "filesystem"
+  path   = "/workspace/.git/**"
+  perm   = "w"
 
   [[keys.ci_agent.rules]]
-  effect = "grant"
-  type = "program"
+  effect     = "grant"
+  type       = "program"
   executable = "cargo"
+  perm       = "x"
 
 [keys.read_only_agent]
 description = "Read-only observer"
-token = "sk_live_xyz789..."
+token       = "sk_live_xyz789..."
 
   [[keys.read_only_agent.rules]]
   effect = "grant"
-  type = "tool"
-  name = "read_file"
+  type   = "tool"
+  name   = "read_file"
 
   [[keys.read_only_agent.rules]]
   effect = "grant"
-  type = "filesystem"
-  path = "/workspace/**"
-  ops = ["read", "list"]
+  type   = "filesystem"
+  path   = "/workspace/**"
+  perm   = "r"
 ```
 
 ---
@@ -357,11 +389,12 @@ token = "sk_live_xyz789..."
 
 When the config file changes on disk:
 1. Parse and validate the new config
-2. If **invalid** — log a warning, keep the current config active, do not reload
-3. If **valid** — atomically swap the in-memory config (`Arc<RwLock<Config>>`)
+2. If **invalid** — log a warning, keep current config active, do not reload
+3. If **valid** — atomically swap in-memory config (`Arc<RwLock<Config>>`)
 4. Log the reload event to the audit log
 
-In-flight requests complete under the old config. New requests see the new config immediately after the swap.
+In-flight requests complete under the old config. New requests see the new
+config immediately after the swap.
 
 ---
 
@@ -376,48 +409,26 @@ In-flight requests complete under the old config. New requests see the new confi
 - HTTP server for tool call requests
 - Server-Sent Events for streaming responses
 - Supports multiple concurrent agents
-- Bearer token passed in `Authorization` header
+- Bearer token in `Authorization: Bearer <token>` header
 - Enabled via `transport = "http"` or `transport = "both"` in config
-
----
-
-## Utility Plugin Architecture
-
-```rust
-pub trait McpTool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-    fn schema(&self) -> serde_json::Value;
-    fn resource_types(&self) -> &[ResourceType];
-    fn resolve_resources(&self, args: &serde_json::Value) -> Result<Vec<ResourceRequest>, ToolError>;
-    async fn execute(&self, args: serde_json::Value, ctx: &RequestContext) -> Result<serde_json::Value, ToolError>;
-}
-```
-
-Adding a utility:
-1. Create `src/tools/my_tool.rs`
-2. Implement `McpTool`
-3. Register in `src/tools/mod.rs`
-
-No macros or codegen required.
 
 ---
 
 ## Request Lifecycle
 
 ```
-Agent request (tool_name + args + bearer_token)
+Agent request  (tool_name + args + bearer_token)
         |
         v
-1. Key resolution                  unknown key → 401
-2. tool grant check                no tool grant → 403
-3. tool.resolve_resources(args)    → Vec<ResourceRequest>
-4. Deny rule scan                  any deny match → 403
-5. Grant rule scan                 all resources granted? → continue : 403
-6. tool.execute(args, ctx)
+1. Key resolution              unknown key  → 401
+2. Tool grant check            no tool rule → 403
+3. tool.resolve_resources()    → Vec<ResourceRequest>
+4. Deny rule scan              any match    → 403
+5. Grant rule scan             any uncovered resource → 403
+6. Spawn child process         env scoped to granted resources
         |
         v
-Audit log entry (key, tool, resources, decision, timestamp)
+Audit log  (key, tool, resources, decision, outcome, timestamp)
         |
         v
 Response
@@ -432,7 +443,7 @@ pansophical/
 ├── src/
 │   ├── main.rs
 │   ├── config/          # TOML parsing, hot reload, validation
-│   ├── authz/           # Key resolution, rule evaluation (deny/grant)
+│   ├── authz/           # Key resolution, permission bits, rule evaluation
 │   ├── audit/           # Audit log writer
 │   ├── transport/
 │   │   ├── stdio.rs
@@ -450,8 +461,7 @@ pansophical/
 
 ## Deferred / Open
 
-- [ ] Tool process sandboxing (Layer 2 enforcement) — design needed before first spawning tool
-- [ ] Transitive resource access in sub-processes
-- [ ] Per-tool sandbox config knob
+- [ ] Transitive resource access in sub-processes — revisit with Layer 2 sandboxing
+- [ ] Layer 2 OS-level sandboxing (seccomp / Job Objects) — design before first spawning tool ships
 - [ ] Signing scheme upgrade path (HMAC / Ed25519)
 - [ ] First batch of utilities (post-framework review)
