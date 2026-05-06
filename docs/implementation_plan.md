@@ -73,6 +73,19 @@ math is correct and unit-tested.
 3. Implement `canonical_path()`:
    - `std::fs::canonicalize` (resolves `..`, `.`, symlinks)
    - On Windows: lowercase result before glob match
+   - **Non-existent path handling** (the "create" case): `canonicalize` fails
+     if the target doesn't exist. For write/create operations, canonicalize
+     the *parent directory* and append the requested filename. This prevents
+     `../` inside a new filename from escaping the sandbox while still
+     allowing creation of files that don't yet exist.
+     ```rust
+     fn canonical_path_for_create(path: &Path) -> Result<PathBuf> {
+         let parent = path.parent().ok_or(Error::NoParent)?;
+         let filename = path.file_name().ok_or(Error::NoFilename)?;
+         let canonical_parent = std::fs::canonicalize(parent)?;
+         Ok(canonical_parent.join(filename))
+     }
+     ```
 4. Implement deny-before-grant evaluation:
    ```
    for each AccessRequest:
@@ -279,8 +292,11 @@ outside `actual_grant`. Environment stripping is enforced.
 
 **`read_file`**:
 - `access_requests()`: `canonical_path(args.path)` → `AccessRequest::filesystem(path, READ)`
-- `execute()`: spawn child (or inline read — file reading can be in-process
-  since the sandbox enforces access anyway); return `TextContent`
+- `execute()`: spawn out-of-process child scoped to `actual_grant`; return `TextContent`
+  > **No inline reads.** Even for simple file reads, execution must be
+  > out-of-process. Applying Landlock to the server's own thread would
+  > restrict the server's access to its config files, audit log, and `tools/`
+  > directory. The "Always Out-of-Process" rule has no exceptions.
 
 **`write_file`**:
 - `access_requests()`: `canonical_path(args.path)` → `AccessRequest::filesystem(path, WRITE | CREATE)`
@@ -389,15 +405,23 @@ immediately without restarting the server.
    > bindings) and the `CreateAppContainerProfile` / `DeleteAppContainerProfile`
    > Win32 functions as the starting point. If a higher-level wrapper exists
    > at implementation time, prefer it.
-2. Assign spawned child to AppContainer
-3. Assign child to Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
-4. Environment stripping: same logic as Linux, using Windows API
-5. All sandbox logic is `#[cfg(target_os = "windows")]`; Linux path is
+2. **Profile naming convention**: all AppContainer profiles are named
+   `pansophical-<uuid>`. This allows startup cleanup.
+3. **Startup scavenging**: on server start, enumerate all AppContainer profiles
+   matching the `pansophical-*` prefix and delete any that exist. This handles
+   the crash/force-kill case where `DeleteAppContainerProfile` never ran.
+   Registry ghosts from orphaned profiles are cleaned up on every boot.
+4. Assign spawned child to AppContainer
+5. Assign child to Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+6. Environment stripping: same logic as Linux, using Windows API
+7. All sandbox logic is `#[cfg(target_os = "windows")]`; Linux path is
    `#[cfg(target_os = "linux")]`; `strategy = "auto"` selects platform
 
 ### ✅ Testable (Windows only)
 - Same test cases as Phase 5, run on Windows
 - Verify AppContainer profile is created and destroyed per invocation
+- Force-kill server mid-invocation; restart; verify orphaned profiles are
+  cleaned up on startup
 
 ---
 
@@ -419,6 +443,10 @@ receive streaming responses.
    - `on_disconnect = "detach"`: retain handle in `DashMap<RequestId, RunningTool>`
      with a grace-period timeout
 5. Re-attach: `GET /tools/stream/:request_id` resumes SSE for a detached tool
+6. **Reattach audit entry**: every reattach event is logged as a separate audit
+   entry with `event: "reattach"`, the original `connection_id`, the new
+   `connection_id`, and the `request_id`. This is a new authorization context
+   for the same running tool and must be visible to auditors.
 
 ### ✅ Testable
 - Connect with a valid bearer token → `initialize` equivalent (tools/list works)
@@ -448,11 +476,16 @@ tools stream progress. File and device resources are listable and readable.
    unless `allow_shell = true` is explicit (triggers audit log warning on every call)
 3. **Arg injection validation**: validate all agent-provided argument values
    that will be passed to the child process:
-   - Reject values containing shell metacharacters (`; & | > < ` $ ( )`) if
+   - Reject values containing shell metacharacters (``; & | > < ` $ ( )``) if
      `allow_shell = false` (defence-in-depth; the shell isn't involved, but
      a naive script using `os.system(arg)` internally would still be dangerous)
-   - Log a warning; the tool definition can declare `arg_passthrough = true`
-     to opt out of this check for args that legitimately contain special chars
+   - **Flag injection**: by default, reject any agent-provided argument value
+     that starts with `-`. This prevents an agent from passing `--config=/etc/shadow`
+     to trick a script into reading unintended files. Tool definitions can
+     whitelist specific args for hyphen-prefixed values with `allow_flags = true`
+     per argument, or the entire tool can set `arg_passthrough = true` to
+     disable all arg validation (requires explicit opt-in + audit warning)
+   - Log a warning on every rejected argument
 4. `access_requests()`: iterate `[[tool.resources]]`, substitute `path_from_arg`
    from actual call args, call `canonical_path()`
 5. If `streaming = true` and `ctx.progress_token.is_some()`: drain stdout as
