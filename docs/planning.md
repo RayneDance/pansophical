@@ -19,6 +19,7 @@ A **local MCP (Model Context Protocol) server** written in Rust that:
 | Hot reload | Yes — validate on change, enforce only if valid |
 | MCP transport | stdio (default/local) + HTTP/SSE (remote, opt-in) |
 | Permission model | Unix-style `r/w/x` bit flags (verb aliases in TOML) |
+| Authorization naming | `PolicyTarget` (not "resource type") to avoid collision with MCP Resources |
 | Tool spawning | Always out-of-process |
 | Per-tool resource config | No — policy lives on the key |
 | Enforcement model | Key ceiling ∩ Tool needs = actual child grant |
@@ -28,6 +29,9 @@ A **local MCP (Model Context Protocol) server** written in Rust that:
 | Child environment | Clean by default; env grants are the whitelist |
 | Authz explain mode | Dev-mode only; returns policy diff on denial |
 | SSE disconnect | Kill child on disconnect (default); re-attach via request_id |
+| MCP lifecycle | Full compliant initialize handshake; stdio auth via `_meta.token` |
+| MCP Resources primitive | Phase 1: file + device URIs; same policy evaluation as tools |
+| Progress notifications | Supported via `notifications/progress` with `progressToken` |
 | First utilities | After framework is reviewed and stable |
 
 ---
@@ -41,11 +45,102 @@ Each agent caller is identified by a **named key**. When a request comes in:
 3. The policy is evaluated against the tool and resource being requested
 4. If authorized → execute; if not → return a structured denial
 
-**Phase 1**: Static bearer token (`Authorization: Bearer <token>` over HTTP,
-or a header field in the stdio envelope).
+**Phase 1**: Static bearer token.
+- **HTTP/SSE**: `Authorization: Bearer <token>` header on the initial SSE connection.
+- **stdio**: token passed in `params._meta.token` of the `initialize` request.
+  The key is resolved once during the handshake and bound to the session.
 
 **Future**: HMAC-per-request or Ed25519 keypair. The key resolution interface
 is designed to swap this in without changing the authorization layer.
+
+---
+
+## MCP Protocol Compliance
+
+Pansophical targets MCP spec version **`2024-11-05`** (current stable).
+
+### Session Lifecycle
+
+#### 1. Initialize (client → server)
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": { "name": "my_agent", "version": "1.0.0" },
+    "_meta": {
+      "token": "sk_live_abc123..."   // stdio auth
+    }
+  }
+}
+```
+
+Server actions:
+1. Validate protocol version (reject with error if unsupported)
+2. Extract `_meta.token`, resolve to key + policy, bind to session
+3. Return capabilities:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "tools":     { "listChanged": true },
+      "resources": { "listChanged": true, "subscribe": false },
+      "logging":   {}
+    },
+    "serverInfo": { "name": "pansophical", "version": "0.1.0" }
+  }
+}
+```
+
+`tools.listChanged: true` — hot reload can add/remove tools at runtime.  
+`resources.listChanged: true` — hot reload affects the resource list too.
+
+#### 2. Initialized (client → server)
+
+```json
+{ "jsonrpc": "2.0", "method": "notifications/initialized" }
+```
+
+No response. Server is now fully operational for this session.
+
+#### 3. HTTP/SSE Auth
+
+Bearer token in the `Authorization` header on the initial SSE connection:
+```
+GET /sse HTTP/1.1
+Authorization: Bearer sk_live_abc123...
+```
+Key is resolved once at connection establishment and applies to all tool calls
+over that stream.
+
+#### 4. Shutdown
+
+- **stdio**: server exits cleanly when stdin closes
+- **HTTP/SSE**: SSE stream closes; in-flight calls complete or are killed per
+  the disconnect policy; pending confirms are auto-denied; reaper kills children
+
+### JSON-RPC Error Codes
+
+| Code | Meaning |
+|---|---|
+| -32700 | Parse error |
+| -32600 | Invalid request |
+| -32601 | Method not found |
+| -32602 | Invalid params |
+| -32603 | Internal error |
+| -32000 | Auth error (unknown key) |
+| -32001 | Unauthorized (PolicyTarget denied) |
+| -32002 | Rate limited |
+| -32003 | Tool timeout |
+| -32004 | Confirm denied |
 
 ---
 
@@ -177,7 +272,15 @@ the transport and waits for a manual approval or rejection. Useful for `w` and
 
 ---
 
-## Authorization Resource Types
+## PolicyTarget Types
+
+Each policy rule targets a **PolicyTarget** — the category of system resource
+being controlled. The `type` field in a rule specifies the PolicyTarget.
+
+> **Naming note**: We call this concept `PolicyTarget` (not "resource type")
+> to avoid collision with the MCP protocol's "Resources" primitive, which is
+> a separate concept (data exposed to agents for reading). See **MCP Resources
+> Primitive** for that.
 
 ### 1. `filesystem`
 
@@ -309,6 +412,139 @@ perm   = ["read", "traverse"]
 
 ---
 
+### 10. `device`
+
+Physical hardware access — audio capture, video capture, screen, USB, etc.
+Exposed as MCP Resources via `device://` URIs as well as gated here.
+
+| `name` pattern | Covers |
+|---|---|
+| `microphone/*` | Audio capture devices |
+| `camera/*` | Video capture devices |
+| `display/*` | Screen capture / output |
+| `usb/*` | USB device access |
+
+```toml
+[[keys.my_agent.rules]]
+effect = "grant"
+type   = "device"
+name   = "microphone/default"
+perm   = ["read"]   # capture audio
+```
+
+`x` is not applicable for device targets.
+
+---
+
+---
+
+## MCP Resources Primitive
+
+MCP Resources expose data to agents for reading via `resources/list` and
+`resources/read`. This is distinct from MCP Tools (which perform actions).
+
+> **Naming note**: MCP "Resources" ≠ Pansophical `PolicyTarget`. Resources are
+> data the agent can read. PolicyTargets are the categories of system access
+> that policy rules control.
+
+### Phase 1: File Resources
+
+File resources expose filesystem paths the key has `r` permission on.
+URI format: `file:///absolute/path`
+
+```json
+// resources/list response
+{
+  "resources": [
+    {
+      "uri":      "file:///workspace/README.md",
+      "name":     "README.md",
+      "mimeType": "text/markdown"
+    }
+  ]
+}
+```
+
+`resources/read` on a `file://` URI checks the calling key's policy for
+`filesystem` PolicyTarget `r` on that path. Same evaluation order as tool
+calls: deny → grant → intersection.
+
+### Device Resources
+
+Device streams are MCP Resources with URI scheme `device://`:
+
+| URI | Resource |
+|---|---|
+| `device://microphone/default` | Default audio capture stream |
+| `device://camera/0` | First video capture device |
+| `device://display/primary` | Primary screen capture |
+
+Authorization: `device` PolicyTarget with `r` permission. Same flow as files.
+
+### Future Resource Types
+
+Any PolicyTarget with an `r` bit can expose MCP Resources. Future candidates:
+databases (`db://`), message queues, sensor streams.
+
+### `resources/subscribe`
+
+Not implemented in Phase 1. Server declares `subscribe: false` in capabilities.
+
+---
+
+## Progress Notifications
+
+Long-running tools (`cargo build`, large file operations) stream progress
+to the agent using `notifications/progress`.
+
+### Protocol
+
+Agent includes `_meta.progressToken` in a `tools/call` request:
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "run_cargo",
+    "arguments": { "args": ["build"] },
+    "_meta": { "progressToken": "build-42" }
+  }
+}
+```
+
+While the child runs, the server emits:
+
+```json
+{
+  "method": "notifications/progress",
+  "params": {
+    "progressToken": "build-42",
+    "progress": 45,
+    "total":    100,
+    "message":  "Compiling pansophical v0.1.0"
+  }
+}
+```
+
+The `tools/call` response is sent normally when the child completes.
+
+### Implementation
+
+`RequestContext` carries `Option<ProgressToken>`. Tools check for it in
+`execute()` and, if present, stream stdout lines as progress notifications.
+
+Script tools opt in via `streaming = true` in their definition; `ScriptTool`
+handles the notification loop automatically.
+
+```toml
+# tools/run_cargo.toml
+[tool]
+name      = "run_cargo"
+streaming = true   # enables progress notification streaming
+```
+
+---
+
 ## Tool Isolation & Sandboxing (Phase 1)
 
 ### Always Out-of-Process
@@ -400,14 +636,14 @@ pub trait McpTool: Send + Sync {
     /// JSON Schema for the tool's arguments.
     fn schema(&self) -> serde_json::Value;
 
-    /// Given concrete args, return every resource this invocation will touch.
+    /// Given concrete args, declare every PolicyTarget access this invocation needs.
     /// Called before execute(). Used to compute actual_grant = needs ∩ policy.
     /// Note: this is a pre-spawn declaration, not a security boundary on its
     /// own — Layer 2 OS sandboxing enforces the actual_grant at runtime.
-    fn resolve_resources(
+    fn access_requests(
         &self,
         args: &serde_json::Value,
-    ) -> Result<Vec<ResourceRequest>, ToolError>;
+    ) -> Result<Vec<AccessRequest>, ToolError>;
 
     /// Execute the tool. Authz and intersection have already been computed.
     /// Spawn an out-of-process child scoped to ctx.actual_grant.
@@ -877,7 +1113,7 @@ Agent request  (tool_name + args + bearer_token)
         v
 1. Key resolution              unknown key       → 401
 2. Tool grant check            no tool rule      → 403
-3. tool.resolve_resources()    → Vec<ResourceRequest> (tool's declared needs)
+3. tool.access_requests()      → Vec<AccessRequest> (tool's declared PolicyTarget needs)
 4. Deny rule scan              any deny match    → 403
 5. Grant rule scan             needs not covered → 403
 6. Compute actual_grant        = tool_needs ∩ key_grants
@@ -899,13 +1135,18 @@ Response
 pansophical/
 ├── src/
 │   ├── main.rs
+│   ├── protocol/        # MCP JSON-RPC protocol layer
+│   │   ├── lifecycle.rs # initialize/initialized/shutdown handshake
+│   │   ├── messages.rs  # MCP request/response/notification types
+│   │   ├── resources.rs # MCP Resources primitive (list/read)
+│   │   └── progress.rs  # notifications/progress streaming
 │   ├── config/          # TOML parsing, hot reload, validation, glob compilation
-│   ├── authz/           # Key resolution, permission bits, rule evaluation,
+│   ├── authz/           # Key resolution, PolicyTarget bits, rule evaluation,
 │   │                    # intersection computation
 │   ├── audit/           # Audit log writer (O_APPEND / syslog)
 │   ├── sandbox/         # OS-level child process sandboxing
 │   │   ├── linux.rs     # landlock + seccomp
-│   │   └── windows.rs   # Job Objects + restricted token
+│   │   └── windows.rs   # AppContainer isolation
 │   ├── reaper.rs        # Child process lifecycle + timeout enforcement
 │   ├── limits.rs        # Rate limiter + concurrency gate
 │   ├── confirm/         # Always-on approval server
