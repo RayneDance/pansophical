@@ -78,17 +78,32 @@ math is correct and unit-tested.
      if no grant rule covers → reject
    actual_grant = tool_requests ∩ matched_grants
    ```
+   **Intersection is a subset check**: an `AccessRequest` is satisfied when
+   there exists a matching grant rule whose path glob contains the requested
+   path AND whose `Perm` bits are a superset of the requested bits. The
+   actual grant for that request is the *requested* bits (not the grant's
+   broader bits). Example: tool asks `r` on `/workspace/src/main.rs`, key
+   grants `rw` on `/workspace/**` → actual is `r` on `/workspace/src/main.rs`.
 5. Registry normalization: `HKCU` → `HKEY_CURRENT_USER`, slashes → backslashes
 6. Key resolution: token → `KeyConfig`
+7. **Authz Explain Mode** (`dev_mode = true`): on any denial, build a
+   `PolicyDiff` struct (`requested`, `matched_grants`, `denied_reasons`) and
+   attach it to the error response. Implement this now — it is essential for
+   debugging in Phases 5 and 6.
 
 ### ✅ Testable (unit tests in `src/authz/tests.rs`)
 - Intersection math: tool asks `rw`, key grants `r` → actual is `r`
+- Subset check: tool asks `r` on `/workspace/src/main.rs`, key grants `rw`
+  on `/workspace/**` → actual is `r` on the specific path (not `rw`)
 - Deny always wins over grant on same path
 - Path traversal: `../../etc/passwd` in `access_requests()` is canonicalized
   and falls outside `/workspace/**` → denied
 - Windows case bypass: `C:\Users\X` and `c:\users\x` match the same rule
 - Registry: `HKCU/Foo` and `HKEY_CURRENT_USER\Foo` match the same rule
+- Registry case: `hkcu/Foo` and `HKCU/Foo` are treated identically
 - Unknown key token → key resolution returns `None`
+- `dev_mode = true`: denied request returns `explain` block; `dev_mode = false`:
+  all denials return identical -32001 regardless of which rule caused it
 
 ---
 
@@ -115,6 +130,12 @@ handshake, and call `tools/list`. No tools execute yet.
 3. Handle `tools/list` → return empty array for now
 4. Handle unknown methods → return -32601 Method Not Found
 5. Graceful shutdown on stdin close
+6. **Stdio stdout isolation**: the server's stdout fd is the JSON-RPC channel.
+   Child processes spawned later (Phase 5+) must NEVER inherit it. All
+   `tokio::process::Command` spawns must explicitly set
+   `stdout(Stdio::piped())` and `stderr(Stdio::piped())`. Inheriting the
+   parent stdout fd would interleave child output with JSON-RPC responses,
+   corrupting the protocol silently.
 
 ### ✅ Testable
 - Use `echo` / pipe to drive JSON-RPC messages; verify responses
@@ -177,7 +198,15 @@ agents can't exhaust server resources.
 2. Concurrency gate: atomic counter; reject (or optionally queue) when
    `max_concurrent_tools` is reached
 3. Per-key limit overrides from `[keys.*.limits]`
-4. Errors: rate limited → -32002; concurrency exceeded → -32003 (reuse timeout code) or a new code
+4. Errors: rate limited → -32002; concurrency exceeded → -32003
+5. **Output pipe monitoring**: the server reads child stdout/stderr through
+   the pipe. Track cumulative bytes read; kill child and return an error
+   if it exceeds `max_output_bytes`. This catches runaway output before
+   it exhausts memory.
+   > **Disk write quota**: enforcing a `max_disk_write_bytes` limit requires
+   > cgroups (Linux) or job object I/O accounting (Windows). This is deferred;
+   > document as a known limitation. Operators should use filesystem quotas
+   > at the OS level for now.
 
 ### ✅ Testable
 - Fire 100 requests rapidly with a key limited to 60/min → excess get -32002
@@ -202,12 +231,25 @@ outside `actual_grant`. Environment stripping is enforced.
    - Add `env_baseline` vars (`PATH`, `TERM`, `LANG`, `HOME`)
    - Add key's `environment` grants
 2. Apply Landlock: derive allowed paths from `actual_grant.filesystem` entries
+   > **TOCTOU note**: Landlock binds to inodes, not path strings. Always
+   > build Landlock rules from the results of `canonical_path()` (the
+   > already-resolved canonical paths), never from raw agent-provided strings.
+   > This means a symlink swap after canonicalization cannot redirect the
+   > child to an unintended inode — Landlock holds the original inode.
 3. Apply seccomp: block syscalls not needed for typical scripting (optional
    allowlist, conservative defaults)
 4. Assign child to process group; set `PR_SET_PDEATHSIG = SIGKILL`
-5. Reaper: spawn a task per child; kill after `tool_timeout_secs`
-6. Use `tokio::process::Command` with `stdout(Stdio::piped())` AND
-   `stderr(Stdio::piped())`; drain both concurrently
+5. **Signal handling — graceful shutdown**: install `SIGINT`/`SIGTERM` handlers
+   in `main.rs`:
+   - Stop accepting new tool calls (return -32603 Internal Error)
+   - Send `notifications/cancelled` to all active sessions
+   - Give the reaper `shutdown_grace_secs` (config) to wait for in-flight
+     children to finish or be killed
+   - Force-kill any surviving children; then exit 0
+6. Reaper: spawn a task per child; kill after `tool_timeout_secs`
+7. Use `tokio::process::Command` with `stdout(Stdio::piped())` AND
+   `stderr(Stdio::piped())`; drain both with `tokio::select!` on separate
+   async tasks to prevent either pipe from filling and deadlocking the child
 
 ### ✅ Testable (Linux only at this phase)
 - Spawn a tool with `filesystem /tmp r` actual_grant; verify it cannot write to `/tmp`
@@ -276,6 +318,11 @@ blocking forever or hard-denying.
    confirm fires; log a clear error to audit log if browser open fails (headless)
 5. Session approval cache: `DashMap<(ConnectionId, KeyId, ToolName, Pattern, Perm), Instant>`
    - Cleared on connection drop
+   - **Re-attach behaviour**: for HTTP/SSE detached sessions (Phase 10),
+     session approvals survive through the `reattach_grace_secs` window.
+     If re-attach occurs: approvals are transferred to the new connection ID.
+     If the grace period expires without re-attach: approvals are purged
+     along with the detached tool handle.
    - Background task sweeps for inactivity expiry every 30s
 6. Pending queue: `DashMap<Token, oneshot::Sender<ApprovalResult>>`
 7. Admin routes (`/tools`, `/keys`) require `ui.auth.pin` if set
@@ -327,8 +374,14 @@ immediately without restarting the server.
 
 ### Key Tasks
 1. Create AppContainer profile from `actual_grant` filesystem paths
+   > **Do not implement AppContainer from raw Win32 syscalls.** Managing
+   > Capability SIDs and Security Descriptors by hand is error-prone and
+   > takes weeks. Evaluate the `windows` crate (Microsoft's official Rust
+   > bindings) and the `CreateAppContainerProfile` / `DeleteAppContainerProfile`
+   > Win32 functions as the starting point. If a higher-level wrapper exists
+   > at implementation time, prefer it.
 2. Assign spawned child to AppContainer
-3. Assign child to Job Object with kill-on-close
+3. Assign child to Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
 4. Environment stripping: same logic as Linux, using Windows API
 5. All sandbox logic is `#[cfg(target_os = "windows")]`; Linux path is
    `#[cfg(target_os = "linux")]`; `strategy = "auto"` selects platform
@@ -379,13 +432,23 @@ tools stream progress. File and device resources are listable and readable.
 
 ### Key Tasks
 
+### Key Tasks
+
 **ScriptTool**:
 1. Load `[tool.invoke]` from definition; build `tokio::process::Command`
-2. Never use shell: spawn `command` with `args` directly; reject if `allow_shell`
-   is absent
-3. `access_requests()`: iterate `[[tool.resources]]`, substitute `path_from_arg`
+2. Never use shell: spawn `command` with `args` directly; reject at load time
+   if `command` resolves to `sh`, `bash`, `cmd`, `powershell`, or similar,
+   unless `allow_shell = true` is explicit (triggers audit log warning on every call)
+3. **Arg injection validation**: validate all agent-provided argument values
+   that will be passed to the child process:
+   - Reject values containing shell metacharacters (`; & | > < ` $ ( )`) if
+     `allow_shell = false` (defence-in-depth; the shell isn't involved, but
+     a naive script using `os.system(arg)` internally would still be dangerous)
+   - Log a warning; the tool definition can declare `arg_passthrough = true`
+     to opt out of this check for args that legitimately contain special chars
+4. `access_requests()`: iterate `[[tool.resources]]`, substitute `path_from_arg`
    from actual call args, call `canonical_path()`
-4. If `streaming = true` and `ctx.progress_token.is_some()`: drain stdout as
+5. If `streaming = true` and `ctx.progress_token.is_some()`: drain stdout as
    `notifications/progress` messages; send final `tools/call` result on exit
 
 **MCP Resources**:
