@@ -33,12 +33,14 @@ Server (MVSS). Phases 7–12 build the full feature set on top.
    notify         = "6"          # file watching (hot reload)
    axum           = "0.7"        # confirm server + HTTP transport
    tokio-util     = "0.7"
+   dashmap        = "5"          # concurrent hash maps (session cache, pending confirms)
    open           = "5"          # browser open (confirm server)
    ```
 2. Implement CLI with `clap`:
    - `(default)` — run server
    - `--init` — generate `config.toml` + random `server_secret`, print path, exit 0
    - `--check` — parse + validate `config.toml`, print result, exit 0/1
+   - `--config <path>` — specify config file location (default: `./config.toml`)
 3. `--init` writes a well-commented `config.example.toml` to the current directory
 
 ### ✅ Testable
@@ -163,6 +165,9 @@ what happened and why.
 3. Support `output = "stdout" | "file" | "syslog"`
 4. Structured fields — machine-readable JSON, not prose
 5. Wire into authz evaluation: log every grant, deny, and error
+6. **Stdio transport conflict**: when `transport = "stdio"`, `output = "stdout"`
+   is forbidden — it would corrupt the JSON-RPC channel. `--check` must reject
+   this combination. Default fallback: `output = "file"` with a warning.
 
 ### Audit Entry shape
 ```json
@@ -256,6 +261,8 @@ outside `actual_grant`. Environment stripping is enforced.
 - Spawn a tool with no environment grants; verify `$HOME` is absent (only baseline vars present)
 - Spawn a tool that sleeps 60s with `tool_timeout_secs = 2`; verify it's killed
 - Kill the server process; verify orphaned child is also killed
+- Send SIGTERM to the server with a running child; verify the server stops
+  accepting new calls, waits for the child, then exits cleanly
 
 ---
 
@@ -292,8 +299,10 @@ outside `actual_grant`. Environment stripping is enforced.
 - `tools/list` returns `read_file` and `write_file` with correct JSON Schema
 - `read_file` on a path the key has `r` → returns content
 - `read_file` on a path outside key grants → -32001 Unauthorized
-- `write_file` with a `confirm = true` rule → hangs until confirm resolved
-  (confirm server not yet wired — verify it blocks, then times out and denies)
+- `write_file` with a `confirm = true` rule → blocks; since no confirm server
+  exists yet (Phase 7), the request auto-denies after `timeout_secs` with -32004.
+  This is correct fail-closed behavior: confirm gates without a resolution
+  mechanism always deny.
 - Path traversal in args (`../../etc/passwd`) → denied after canonicalization
 
 ---
@@ -429,8 +438,6 @@ tools stream progress. File and device resources are listable and readable.
 - `src/tools/script.rs` — `ScriptTool` implementing `McpTool`
 - `src/protocol/resources.rs` — `resources/list`, `resources/read`
 - `src/protocol/progress.rs` — `notifications/progress` sender
-
-### Key Tasks
 
 ### Key Tasks
 
