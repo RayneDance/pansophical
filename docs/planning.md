@@ -512,25 +512,110 @@ Available at `http://127.0.0.1:9765/tools`
 
 ```toml
 [server]
-host      = "127.0.0.1"
-port      = 3000
-transport = "stdio"       # "stdio" | "http" | "both"
+host          = "127.0.0.1"
+port          = 3000
+transport     = "stdio"       # "stdio" | "http" | "both"
+# Auto-generated and persisted on first run if left empty.
+# Used to sign confirm tokens. Set explicitly to keep tokens valid across restarts.
+server_secret = ""
 
 [server.http]
 cors_origins = ["http://localhost:*"]   # strict allowlist for browser agents
 # origin header validated on every request
 
+[tools]
+dir = "./tools"   # path to script tool definition directory
+
+[sandbox]
+enabled  = true     # disable only if platform support is unavailable
+strategy = "auto"   # "auto" | "landlock" (Linux) | "job_object" (Windows)
+
 [audit]
 enabled = true
-output  = "stdout"        # "stdout" | "file" | "syslog"
-path    = "audit.log"     # file mode: opened O_APPEND; server user cannot truncate
-# Audit log records every authz decision, not just tool outcomes
+output  = "stdout"  # "stdout" | "file" | "syslog"
+path    = "audit.log"
 
 [limits]
 max_invocations_per_minute = 60
 max_concurrent_tools        = 4
 tool_timeout_secs           = 30
 max_output_bytes            = 1_048_576
+
+# ── UI / Admin Dashboard ──────────────────────────────────────────────────────
+
+[ui]
+port      = 9765
+auto_open = "confirm"   # "startup" | "confirm" | "never"
+                        # "startup" = open browser when server starts
+                        # "confirm" = only open when a confirm rule fires
+                        # "never"   = never auto-open (headless / CI)
+
+[ui.auth]
+# Optional PIN to protect the admin UI.
+# If empty, localhost-only binding is the sole protection.
+# Recommended for shared or multi-user machines.
+pin = ""
+
+[ui.confirm]
+timeout_secs = 30   # auto-deny unanswered confirm requests after this many seconds
+
+# ── Theming ───────────────────────────────────────────────────────────────────
+#
+# Theming is layered — each layer overrides the one above it:
+#
+#   1. Built-in default styles
+#   2. [ui.theme] preset and mode
+#   3. [ui.theme.colors] token overrides
+#   4. [ui.theme.typography] overrides
+#   5. [ui.custom.css_path] — loaded last, can override anything
+
+[ui.theme]
+mode   = "system"    # "light" | "dark" | "system" (follows OS preference)
+preset = "default"   # built-in palettes: "default" | "ocean" | "forest"
+                     #                    "rose"    | "slate"  | "mono"
+
+# Fine-grained color token overrides.
+# Values are CSS HSL components (hue deg, saturation %, lightness %).
+# e.g. accent = "262 83% 58%" renders as hsl(262, 83%, 58%).
+# Omit any token to inherit from the active preset.
+[ui.theme.colors]
+accent      = ""   # primary interactive color (buttons, links, highlights)
+background  = ""   # page background
+surface     = ""   # cards, panels, modals
+surface_alt = ""   # alternate surface (table rows, input backgrounds)
+border      = ""   # borders and dividers
+text        = ""   # primary text
+text_muted  = ""   # secondary / placeholder text
+success     = ""   # success states (green family)
+warning     = ""   # warning states (amber family)
+danger      = ""   # error / destructive states (red family)
+
+[ui.theme.typography]
+font_sans = "Inter"           # sans-serif; loaded from Google Fonts if not installed locally
+font_mono = "JetBrains Mono" # monospace; used for paths, tokens, code blocks, audit log
+font_size = 14                # base font size in px (UI scales from this)
+
+[ui.theme.layout]
+density    = "comfortable"   # "compact" | "comfortable" | "spacious"
+animations = true            # micro-animations and transitions; set false to reduce motion
+radius     = "md"            # border radius scale: "none" | "sm" | "md" | "lg" | "full"
+
+# ── Branding ──────────────────────────────────────────────────────────────────
+
+[ui.branding]
+title        = "Pansophical"   # browser tab title and dashboard header
+logo_path    = ""              # path to a custom logo image (SVG or PNG)
+favicon_path = ""              # path to a custom favicon (.ico, .png, or .svg)
+footer_text  = ""              # optional custom text in the dashboard footer
+show_version = true            # show server version in the UI footer
+
+# ── Custom CSS ────────────────────────────────────────────────────────────────
+
+[ui.custom]
+# Path to a CSS file loaded after all built-in styles.
+# Full override capability — target any class or CSS custom property.
+# Hot-reloaded alongside the rest of the config.
+css_path = ""
 
 # -- Keys --
 
