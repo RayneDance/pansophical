@@ -374,10 +374,137 @@ pub trait McpTool: Send + Sync {
 }
 ```
 
-Adding a utility:
-1. Create `src/tools/my_tool.rs`
+### Built-in Tools
+Implemented in Rust, compiled into the binary. These are the primitives
+(`read_file`, `write_file`, `run_program`, etc.) that script tools are built on.
+
+Adding a built-in tool:
+1. Create `src/tools/builtin/my_tool.rs`
 2. Implement `McpTool`
 3. Register in `src/tools/mod.rs`
+
+### Script Tools
+External scripts/programs exposed as MCP tools. No Rust required.
+A generic `ScriptTool` struct implements `McpTool` and is driven entirely
+by a TOML definition file. See the **Script Tool Definitions** section.
+
+---
+
+## Script Tool Definitions
+
+Script tools live in a `tools/` directory alongside `config.toml`.
+One `.toml` file per tool. The server watches this directory; dropping
+or deleting a file hot-reloads the tool registry immediately.
+
+```
+pansophical/
+├── config.toml
+├── tools/
+│   ├── file_editor.toml
+│   ├── code_reviewer.toml
+│   └── ...
+```
+
+### Tool Definition Format
+
+```toml
+# tools/file_editor.toml
+
+[tool]
+name        = "file_editor"
+description = "Modifies a file in some specific way"
+version     = "1.0.0"
+enabled     = true
+
+# How to invoke it
+[tool.invoke]
+command     = "py"
+args        = ["some_file_editor_flow.py"]
+working_dir = "/workspace/scripts"   # optional; defaults to server cwd
+
+# JSON Schema for agent-provided arguments.
+# Validated before resolve_resources() is called.
+[tool.schema]
+type     = "object"
+required = ["path"]
+
+  [tool.schema.properties.path]
+  type        = "string"
+  description = "Absolute path to the file to edit"
+
+  [tool.schema.properties.mode]
+  type    = "string"
+  enum    = ["append", "overwrite"]
+  default = "overwrite"
+
+# Resource declarations — what this tool will access given its args.
+# The server uses these + actual arg values to run resolve_resources().
+# Checked against the calling key's policy (intersection model).
+
+[[tool.resources]]
+type          = "filesystem"
+path_from_arg = "path"   # resolved at call time from the agent's "path" arg
+perm          = "rw"
+
+[[tool.resources]]
+type       = "program"
+executable = "py"
+perm       = ["execute"]
+
+# Suggested grants — what a key typically needs to call this tool.
+# Informational only; does not affect enforcement.
+# The web UI pre-populates these when granting a key access to this tool.
+# Operators can accept, tighten, or broaden the suggestions.
+
+[[tool.suggested_grants]]
+type = "tool"
+name = "file_editor"
+
+[[tool.suggested_grants]]
+type = "filesystem"
+path = "/workspace/**"
+perm = "rw"
+
+[[tool.suggested_grants]]
+type       = "program"
+executable = "py"
+perm       = ["execute"]
+```
+
+### How `resolve_resources()` Works for Script Tools
+
+The `ScriptTool` wrapper implements `resolve_resources()` by iterating
+the `[[tool.resources]]` declarations and substituting `path_from_arg`
+(and similar) with the actual values from the agent's args at call time:
+
+```
+Agent calls file_editor(path="/workspace/src/main.rs", mode="overwrite")
+        |
+        v
+ScriptTool::resolve_resources() reads [[tool.resources]]:
+  - filesystem  /workspace/src/main.rs  rw   ← substituted from arg
+  - program     py                       x
+        |
+        v
+Authz intersection check against calling key's policy
+```
+
+### Web UI — Tool Management
+
+Available at `http://127.0.0.1:9765/tools`
+
+**Adding a tool:**
+1. Fill in name, description, command, args
+2. Build the argument schema (form-driven JSON Schema builder)
+3. Declare resources (dropdowns: type → arg mapping → permission bits)
+4. Submit → server writes `tools/<name>.toml` → hot reload fires
+
+**Granting a key access:**
+1. Navigate to the key on the Keys page
+2. "Grant tool access" → pick tool from list
+3. UI pre-populates `suggested_grants` from the tool definition
+4. Operator reviews, tightens or broadens, confirms
+5. Server writes updated rules to `config.toml` → hot reload fires
 
 ---
 
@@ -599,12 +726,16 @@ pansophical/
 │   │   ├── stdio.rs
 │   │   └── http.rs      # includes CORS enforcement
 │   ├── tools/           # McpTool trait + registry
-│   │   └── mod.rs
+│   │   ├── mod.rs       # trait definition + unified registry
+│   │   ├── builtin/     # compiled-in Rust tools
+│   │   └── script.rs    # ScriptTool wrapper (loads from tools/*.toml)
 │   └── error.rs
 ├── docs/
 │   └── planning.md
 ├── Cargo.toml
-└── config.example.toml
+├── config.example.toml
+└── tools/               # script tool definitions (one .toml per tool)
+    └── example_tool.toml
 ```
 
 ---
