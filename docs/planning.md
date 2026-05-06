@@ -15,12 +15,16 @@ A **local MCP (Model Context Protocol) server** written in Rust that:
 |---|---|
 | Signing scheme | Static bearer token to start |
 | Deny lists | Yes — explicit deny rules, evaluated before grants |
-| Audit log | On by default; configurable and optional |
+| Audit log | On by default; configurable; O_APPEND or syslog |
 | Hot reload | Yes — validate on change, enforce only if valid |
 | MCP transport | stdio (default/local) + HTTP/SSE (remote, opt-in) |
-| Permission model | Unix-style `r/w/x` bit flags |
+| Permission model | Unix-style `r/w/x` bit flags (verb aliases in TOML) |
 | Tool spawning | Always out-of-process |
-| Per-tool resource policy | No — "access is access" (key policy only) |
+| Per-tool resource config | No — policy lives on the key |
+| Enforcement model | Key ceiling ∩ Tool needs = actual child grant |
+| Layer 2 sandboxing | Phase 1, not future |
+| Safety rails | Rate limits, timeouts, resource caps — configurable |
+| Human-in-the-loop | `confirm = true` on individual rules |
 | First utilities | After framework is reviewed and stable |
 
 ---
@@ -34,56 +38,79 @@ Each agent caller is identified by a **named key**. When a request comes in:
 3. The policy is evaluated against the tool and resource being requested
 4. If authorized → execute; if not → return a structured denial
 
-**Phase 1**: Static bearer token (`Authorization: Bearer <token>` over HTTP, or a header field in the stdio envelope).
+**Phase 1**: Static bearer token (`Authorization: Bearer <token>` over HTTP,
+or a header field in the stdio envelope).
 
-**Future**: HMAC-per-request or Ed25519 keypair. The key resolution interface is designed to swap this in without changing the authorization layer.
+**Future**: HMAC-per-request or Ed25519 keypair. The key resolution interface
+is designed to swap this in without changing the authorization layer.
 
 ---
 
 ## Permission Model: `r/w/x` Bits
 
 Permissions are represented as Unix-style bit flags on every resource rule.
-In TOML, they are written as a compact string. Only include the bits you want to grant.
+Internally a `u8` bitfield (`bitflags!` macro). In TOML they can be written as:
 
-| String | Bits | Meaning |
+- **Short form** `perm = "rw"` — for filesystem, where Unix semantics are clear
+- **Verb form** `perm = ["read", "write"]` — for other resource types, where
+  `x`'s meaning is less obvious. Verbs map 1:1 to bits at parse time.
+
+| Bit | Short | Verb aliases |
 |---|---|---|
-| `"r"` | 100 | read only |
-| `"w"` | 010 | write only |
-| `"x"` | 001 | execute only |
-| `"rw"` | 110 | read + write |
-| `"rx"` | 101 | read + execute |
-| `"rwx"` | 111 | all permissions |
+| 4 | `r` | `read` |
+| 2 | `w` | `write` |
+| 1 | `x` | `execute`, `connect`, `traverse`, `inject`, `signal` |
 
-Internally represented as a `u8` bitfield using the `bitflags!` macro.
+All verb aliases map to the same underlying bit. The per-type semantics table
+makes clear what each bit *means* for that resource type.
 
 ### Semantics Per Resource Type
 
-| Resource | `r` | `w` | `x` |
+| Resource | `r` / `read` | `w` / `write` | `x` — type-specific alias |
 |---|---|---|---|
-| `filesystem` | read content, list dir | create / write / modify / delete | traverse dir, execute file |
-| `program` | capture stdout/stderr | write to stdin | spawn / execute |
-| `network` | receive data | send data | open a connection |
-| `http` | GET, HEAD | POST, PUT, PATCH, DELETE | — (not applicable) |
-| `environment` | read var value | set var in child process | inherit var into child |
-| `secret` | read value | update / rotate | inject into child process env |
-| `registry` | read values | write / create / delete values | enumerate / traverse subkeys |
-| `process` | read info / status | write to stdin | signal / kill |
+| `filesystem` | read content, list dir | create / write / modify / delete | `traverse` (dir), `execute` (file) |
+| `program` | capture stdout/stderr | write to stdin | `execute` — spawn the process |
+| `network` | receive data | send data | `connect` — open a connection |
+| `http` | GET, HEAD | POST, PUT, PATCH, DELETE | — (not used) |
+| `environment` | read var value | set var in child | `inject` — inherit var into child |
+| `secret` | read value | update / rotate | `inject` — inject into child env |
+| `registry` | read values | write / create / delete | `traverse` — enumerate subkeys |
+| `process` | read info / status | write to stdin | `signal` — signal or kill |
 
 > `tool` (meta-authorization) has no permission bits — it is grant/deny only.
+
+Glob patterns on paths are **compiled once at config parse time**, not
+re-evaluated per request.
 
 ---
 
 ## Authorization Model
 
-### "Access Is Access"
+### The Enforcement Principle
 
-The policy lives on the **key**, not on individual tools. If a key has `r` on
-`/workspace/**`, then any tool may read files under that path on behalf of that
-key. There is no second layer of per-tool resource policy.
+There are two parties involved in every resource access:
 
-Tools declare what resources they will touch for a given invocation. The authz
-layer checks that list against the key's policy. If it passes, the tool runs —
-in a restricted out-of-process environment derived from those same grants.
+- The **key policy** sets the *ceiling* — the maximum a caller is allowed
+- The **tool** declares its *needs* via `resolve_resources()` — what it actually requires
+
+The actual permissions granted to the child process are the **intersection**:
+
+```
+actual_grant = tool_needs ∩ key_grants
+```
+
+This provides Principle of Least Privilege automatically, without per-tool
+configuration. A read-only tool that only asks for `r` gets only `r`, even if
+the key holds `rw`. A tool that asks for more than the key allows is rejected.
+
+### Why `resolve_resources()` Is Not a Security Boundary Alone
+
+A tool that lies in `resolve_resources()` (asks for less, does more) can
+defeat the pre-spawn check. This is the "Honest Tool Fallacy." The answer is
+not to trust the declaration — it is to **enforce the intersection at the OS
+level** so the child process physically cannot exceed it.
+
+Layer 2 sandboxing is therefore **Phase 1**, not deferred.
 
 ### Evaluation Order
 
@@ -91,37 +118,39 @@ in a restricted out-of-process environment derived from those same grants.
 Request arrives
     |
     v
-1. Key resolution        — unknown key → immediate reject
-2. Tool grant check      — no tool grant → reject (coarse gate)
-3. resolve_resources()   — tool maps args → Vec<ResourceRequest>
-4. Deny rule scan        — any deny match → reject (overrides grants)
-5. Grant rule scan       — all resources covered by grants? → allow : reject
-6. Spawn child process   — environment scoped to granted resources only
+1. Key resolution          — unknown key → 401
+2. Tool grant check        — no tool rule → 403
+3. resolve_resources()     — tool maps args → Vec<ResourceRequest>
+4. Deny rule scan          — any deny match → 403  (deny always wins)
+5. Grant rule scan         — all tool needs covered by key grants? → continue : 403
+6. Compute actual_grant    — tool_needs ∩ key_grants
+7. confirm check           — any rule has confirm=true? → await user approval
+8. Spawn child process     — environment + OS sandbox scoped to actual_grant
     |
     v
-Audit log (key, tool, resources, decision, outcome, timestamp)
+Audit log  (key, tool, resources, actual_grant, decision, outcome, timestamp)
 ```
 
-Deny rules are **evaluated before grants** and always win. This lets you do
-things like:
-- Grant `filesystem /workspace/**  rw`  (broad)
-- Deny  `filesystem /workspace/.git/**  w`  (specific carve-out)
+Deny rules are **evaluated before grants** and always win:
+- Grant `filesystem /workspace/**  rw`
+- Deny  `filesystem /workspace/.git/**  w`  ← specific carve-out
 
-### Rule Structure
+### Human-in-the-Loop Gate
+
+Individual rules can require explicit user confirmation before execution:
 
 ```toml
 [[keys.my_agent.rules]]
-effect = "deny"
-type  = "filesystem"
-path  = "/etc/**"
-perm  = "rwx"
-
-[[keys.my_agent.rules]]
-effect = "grant"
-type  = "filesystem"
-path  = "/workspace/**"
-perm  = "rw"
+effect  = "grant"
+type    = "filesystem"
+path    = "/workspace/**"
+perm    = "w"
+confirm = true   # server pauses and surfaces an approval request
 ```
+
+When `confirm = true` is hit, the server emits a confirmation request over
+the transport and waits for a manual approval or rejection. Useful for `w` and
+`x` operations on sensitive resources.
 
 ---
 
@@ -137,8 +166,7 @@ path   = "/home/user/project/**"
 perm   = "rw"
 ```
 
-Glob patterns on `path`. The `x` bit on a directory means traverse/enter;
-on a file it means execute.
+Glob on `path`. Short `perm` form is natural here (Unix semantics).
 
 ---
 
@@ -149,12 +177,11 @@ on a file it means execute.
 effect     = "grant"
 type       = "program"
 executable = "git"
-perm       = "x"    # can spawn; add "r" to capture output, "w" to write stdin
+perm       = ["execute"]
 ```
 
-`executable` is matched against the resolved binary name (not full path).
-All process spawning is out-of-process; the child's environment is derived
-from the key's full set of grants.
+`executable` matched against the resolved binary name (not full path).
+All spawning is out-of-process and sandboxed.
 
 ---
 
@@ -167,22 +194,19 @@ type     = "network"
 host     = "api.github.com"
 ports    = [443]
 protocol = "https"
-perm     = "rw"   # r = receive, w = send, x = open connection
+perm     = ["read", "write", "connect"]
 ```
 
 ---
 
 ### 4. `http`
 
-More granular than `network`. `r` = safe methods (GET, HEAD);
-`w` = mutating methods (POST, PUT, PATCH, DELETE). `x` is not used.
-
 ```toml
 [[keys.my_agent.rules]]
 effect      = "grant"
 type        = "http"
 url_pattern = "https://api.github.com/repos/**"
-perm        = "r"   # GET/HEAD only
+perm        = ["read"]   # GET, HEAD only
 ```
 
 ---
@@ -194,7 +218,7 @@ perm        = "r"   # GET/HEAD only
 effect      = "grant"
 type        = "environment"
 var_pattern = "MY_APP_*"
-perm        = "rx"  # read value + inherit into child process
+perm        = ["read", "inject"]
 ```
 
 ---
@@ -206,15 +230,14 @@ perm        = "rx"  # read value + inherit into child process
 effect       = "grant"
 type         = "process"
 name_pattern = "my_service*"
-perm         = "rx"  # read info + signal/kill
+perm         = ["read", "signal"]
 ```
 
 ---
 
 ### 7. `tool`
 
-Meta-authorization. No permission bits — grant/deny only. This is the
-**first gate**, checked before anything else.
+Meta-authorization. No permission bits — grant/deny only. First gate.
 
 ```toml
 [[keys.my_agent.rules]]
@@ -232,59 +255,93 @@ name   = "read_file"   # or "*" for all tools
 effect = "grant"
 type   = "secret"
 name   = "github_pat"
-perm   = "r"
+perm   = ["read"]
 ```
 
 ---
 
 ### 9. `registry` *(Windows-specific)*
 
+Forward slashes are normalized to backslashes at parse time to avoid
+the common double-backslash TOML pitfall.
+
 ```toml
 [[keys.my_agent.rules]]
 effect = "grant"
 type   = "registry"
-path   = "HKCU\\Software\\MyApp\\**"
-perm   = "rx"  # read values + enumerate subkeys
+path   = "HKCU/Software/MyApp/**"   # forward slashes accepted
+perm   = ["read", "traverse"]
 ```
 
 ---
 
-## Tool Isolation
+## Tool Isolation & Sandboxing (Phase 1)
 
 ### Always Out-of-Process
 
-Every tool that interacts with system resources spawns a child process.
-The server never executes privileged operations in-process. This gives us:
-- A clear boundary for what the authz layer needs to control
-- A place to insert OS-level restrictions (Layer 2, future)
-- Clean separation: the server process only runs authz + dispatch logic
+Every tool that touches system resources spawns a child process. The server
+process never performs privileged operations in-process.
 
-### Pre-Spawn Authorization
+### Layer 2: OS-Level Enforcement (Phase 1)
 
-Before any child is spawned:
-1. The tool's `resolve_resources(args)` is called in-proc
-2. It returns the exact resources this invocation will touch
-3. The authz layer evaluates them against the key's deny/grant rules
-4. If all clear, the child is spawned in a restricted environment derived from
-   the granted permissions (restricted PATH, explicit env vars, etc.)
+The pre-spawn authz check (`resolve_resources` → policy evaluation) is a
+**necessary but not sufficient** security control. A compromised or malicious
+tool can lie in `resolve_resources`. OS-level enforcement makes the sandbox
+real, regardless of the tool's declared intent.
+
+| Platform | Mechanism |
+|---|---|
+| Linux | `landlock` (filesystem), `seccomp` (syscall filter), network namespaces |
+| Windows | Job Objects, restricted token, ACL-based filesystem restrictions |
+
+The child process is spawned with an environment and OS-level restrictions
+derived from `actual_grant`. It **physically cannot** access resources outside
+that grant, regardless of what it attempts.
 
 ### Transitive Resource Access
 
 > **Unresolved.** When a spawned process (e.g., `git`) itself accesses
-> resources transitively (e.g., reads `.git/config` which references a remote),
-> the server has no portable way to intercept or validate those accesses before
-> they happen. Portably prompting the user mid-execution is also not practical.
+> resources transitively (e.g., reads `.git/config` → references a remote),
+> the server cannot intercept those accesses at the argument level.
 >
-> **Interim stance**: tools that spawn sub-processes must be scoped tightly
-> enough that transitive access is predictable. Document the transitive behaviour
-> as part of each tool's spec. Revisit with OS-level sandboxing (Layer 2).
+> **Interim stance**: Layer 2 sandboxing is the primary mitigation. The child
+> process's network and filesystem access are restricted to `actual_grant`,
+> so transitive accesses that fall outside the grant are blocked at the OS.
+> Tools must document their transitive behaviour as part of their spec.
 
-### Layer 2: OS-Level Sandboxing (Future)
+### Orphaned Process Reaper
 
-- Linux: `seccomp` + `namespaces` (restrict syscalls, filesystem view, network)
-- Windows: Job Objects + restricted token
-- The child process literally cannot access what it hasn't been granted,
-  regardless of what it attempts. This supersedes the soft pre-spawn check.
+If the Pansophical server crashes or is force-killed, child processes must not
+continue running. Mitigation:
+
+- **Linux**: Assign all children to a process group; `prctl(PR_SET_PDEATHSIG, SIGKILL)` ensures children die with the parent.
+- **Windows**: Assign children to a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
+- A dedicated **reaper thread** monitors child process lifetimes and kills
+  processes that exceed their configured timeout.
+
+---
+
+## Safety Rails
+
+Configurable per-server and per-key to prevent DoS from runaway agents.
+
+```toml
+[limits]
+# Global defaults (can be overridden per key)
+max_invocations_per_minute = 60
+max_concurrent_tools        = 4
+tool_timeout_secs           = 30
+max_output_bytes            = 1_048_576   # 1 MiB
+
+[keys.ci_agent.limits]
+max_invocations_per_minute = 120
+tool_timeout_secs          = 300
+```
+
+- **Rate limit**: token bucket per key; excess requests get 429
+- **Timeout**: hard `SIGKILL` / `TerminateProcess` after `tool_timeout_secs`
+- **Output cap**: truncate or error if child output exceeds `max_output_bytes`
+- **Concurrency**: reject or queue if concurrent tool count is exceeded
 
 ---
 
@@ -299,19 +356,20 @@ pub trait McpTool: Send + Sync {
     fn schema(&self) -> serde_json::Value;
 
     /// Given concrete args, return every resource this invocation will touch.
-    /// Called before execute(). Authz checks this list against key policy.
-    /// Tools must be honest here — this is the pre-spawn authorization gate.
+    /// Called before execute(). Used to compute actual_grant = needs ∩ policy.
+    /// Note: this is a pre-spawn declaration, not a security boundary on its
+    /// own — Layer 2 OS sandboxing enforces the actual_grant at runtime.
     fn resolve_resources(
         &self,
         args: &serde_json::Value,
     ) -> Result<Vec<ResourceRequest>, ToolError>;
 
-    /// Execute the tool. By the time this is called, authz has already passed.
-    /// Implementations should spawn an out-of-process child for any system access.
+    /// Execute the tool. Authz and intersection have already been computed.
+    /// Spawn an out-of-process child scoped to ctx.actual_grant.
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: &RequestContext,
+        ctx: &RequestContext,   // carries actual_grant + key identity
     ) -> Result<serde_json::Value, ToolError>;
 }
 ```
@@ -321,8 +379,6 @@ Adding a utility:
 2. Implement `McpTool`
 3. Register in `src/tools/mod.rs`
 
-No macros or codegen required.
-
 ---
 
 ## TOML Config Structure
@@ -330,19 +386,34 @@ No macros or codegen required.
 ```toml
 [server]
 host      = "127.0.0.1"
-port      = 3000          # used when transport includes "http"
+port      = 3000
 transport = "stdio"       # "stdio" | "http" | "both"
+
+[server.http]
+cors_origins = ["http://localhost:*"]   # strict allowlist for browser agents
+# origin header validated on every request
 
 [audit]
 enabled = true
-output  = "stdout"        # "stdout" | "file"
-path    = "audit.log"     # used when output = "file"
+output  = "stdout"        # "stdout" | "file" | "syslog"
+path    = "audit.log"     # file mode: opened O_APPEND; server user cannot truncate
+# Audit log records every authz decision, not just tool outcomes
+
+[limits]
+max_invocations_per_minute = 60
+max_concurrent_tools        = 4
+tool_timeout_secs           = 30
+max_output_bytes            = 1_048_576
 
 # -- Keys --
 
 [keys.ci_agent]
 description = "CI pipeline agent"
 token       = "sk_live_abc123..."
+
+  [keys.ci_agent.limits]
+  max_invocations_per_minute = 120
+  tool_timeout_secs          = 300
 
   [[keys.ci_agent.rules]]
   effect = "grant"
@@ -362,10 +433,17 @@ token       = "sk_live_abc123..."
   perm   = "w"
 
   [[keys.ci_agent.rules]]
+  effect  = "grant"
+  type    = "filesystem"
+  path    = "/workspace/**"
+  perm    = "w"
+  confirm = true   # any write requires manual approval
+
+  [[keys.ci_agent.rules]]
   effect     = "grant"
   type       = "program"
   executable = "cargo"
-  perm       = "x"
+  perm       = ["execute"]
 
 [keys.read_only_agent]
 description = "Read-only observer"
@@ -388,9 +466,10 @@ token       = "sk_live_xyz789..."
 ## Hot Reload
 
 When the config file changes on disk:
-1. Parse and validate the new config
-2. If **invalid** — log a warning, keep current config active, do not reload
-3. If **valid** — atomically swap in-memory config (`Arc<RwLock<Config>>`)
+1. Parse and validate the new config (including re-compiling all glob patterns)
+2. If **invalid** — log a warning, keep current config active
+3. If **valid** — atomically swap `Arc<RwLock<Config>>`; lock held only for the
+   swap itself, not for the duration of any tool execution
 4. Log the reload event to the audit log
 
 In-flight requests complete under the old config. New requests see the new
@@ -410,7 +489,8 @@ config immediately after the swap.
 - Server-Sent Events for streaming responses
 - Supports multiple concurrent agents
 - Bearer token in `Authorization: Bearer <token>` header
-- Enabled via `transport = "http"` or `transport = "both"` in config
+- Strict CORS: `cors_origins` allowlist + `Origin` header validation on every
+  request (prevents ambient authority attacks from browser-hosted agents)
 
 ---
 
@@ -420,15 +500,17 @@ config immediately after the swap.
 Agent request  (tool_name + args + bearer_token)
         |
         v
-1. Key resolution              unknown key  → 401
-2. Tool grant check            no tool rule → 403
-3. tool.resolve_resources()    → Vec<ResourceRequest>
-4. Deny rule scan              any match    → 403
-5. Grant rule scan             any uncovered resource → 403
-6. Spawn child process         env scoped to granted resources
+1. Key resolution              unknown key       → 401
+2. Tool grant check            no tool rule      → 403
+3. tool.resolve_resources()    → Vec<ResourceRequest> (tool's declared needs)
+4. Deny rule scan              any deny match    → 403
+5. Grant rule scan             needs not covered → 403
+6. Compute actual_grant        = tool_needs ∩ key_grants
+7. confirm check               surface approval request if needed; await
+8. Spawn child (OS-sandboxed)  scoped to actual_grant
         |
         v
-Audit log  (key, tool, resources, decision, outcome, timestamp)
+Audit log  (key, tool, declared_needs, actual_grant, decision, outcome, timestamp)
         |
         v
 Response
@@ -442,12 +524,18 @@ Response
 pansophical/
 ├── src/
 │   ├── main.rs
-│   ├── config/          # TOML parsing, hot reload, validation
-│   ├── authz/           # Key resolution, permission bits, rule evaluation
-│   ├── audit/           # Audit log writer
+│   ├── config/          # TOML parsing, hot reload, validation, glob compilation
+│   ├── authz/           # Key resolution, permission bits, rule evaluation,
+│   │                    # intersection computation
+│   ├── audit/           # Audit log writer (O_APPEND / syslog)
+│   ├── sandbox/         # OS-level child process sandboxing
+│   │   ├── linux.rs     # landlock + seccomp
+│   │   └── windows.rs   # Job Objects + restricted token
+│   ├── reaper.rs        # Child process lifecycle + timeout enforcement
+│   ├── limits.rs        # Rate limiter + concurrency gate
 │   ├── transport/
 │   │   ├── stdio.rs
-│   │   └── http.rs
+│   │   └── http.rs      # includes CORS enforcement
 │   ├── tools/           # McpTool trait + registry
 │   │   └── mod.rs
 │   └── error.rs
@@ -461,7 +549,7 @@ pansophical/
 
 ## Deferred / Open
 
-- [ ] Transitive resource access in sub-processes — revisit with Layer 2 sandboxing
-- [ ] Layer 2 OS-level sandboxing (seccomp / Job Objects) — design before first spawning tool ships
+- [ ] Transitive resource access — mitigated by Layer 2 but not fully solved; document per-tool
+- [ ] `confirm = true` transport protocol — how does the server surface the approval request over stdio vs. HTTP?
 - [ ] Signing scheme upgrade path (HMAC / Ed25519)
 - [ ] First batch of utilities (post-framework review)
