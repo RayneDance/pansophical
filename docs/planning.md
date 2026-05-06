@@ -552,6 +552,12 @@ streaming = true   # enables progress notification streaming
 Every tool that touches system resources spawns a child process. The server
 process never performs privileged operations in-process.
 
+**Process I/O — deadlock prevention**: Child stdout and stderr must be consumed
+concurrently. If the server reads only stdout while the child fills its stderr
+buffer, the child hangs indefinitely (classic broken-pipe deadlock). All child
+spawning uses `tokio::process` with both stdout and stderr read simultaneously
+on separate async tasks, merged or discarded as needed for the tool's result.
+
 ### Layer 2: OS-Level Enforcement (Phase 1)
 
 The pre-spawn authz check (`resolve_resources` → policy evaluation) is a
@@ -659,6 +665,33 @@ pub trait McpTool: Send + Sync {
 Implemented in Rust, compiled into the binary. These are the primitives
 (`read_file`, `write_file`, `run_program`, etc.) that script tools are built on.
 
+**`access_requests()` examples:**
+
+```rust
+// read_file: single request, read-only
+fn access_requests(&self, args: &Value) -> Result<Vec<AccessRequest>, ToolError> {
+    let path = canonical_path(args["path"].as_str()?)?;  // canonicalize first
+    Ok(vec![
+        AccessRequest::filesystem(path, Perm::READ)
+    ])
+}
+
+// move_directory: two requests — source needs read+delete, dest needs write+create
+fn access_requests(&self, args: &Value) -> Result<Vec<AccessRequest>, ToolError> {
+    let src = canonical_path(args["src"].as_str()?)?;
+    let dst = canonical_path(args["dst"].as_str()?)?;
+    Ok(vec![
+        AccessRequest::filesystem(src, Perm::READ | Perm::DELETE),
+        AccessRequest::filesystem(dst, Perm::WRITE | Perm::CREATE),
+    ])
+}
+```
+
+**Path canonicalization is mandatory** inside `access_requests()`. Every path
+must be resolved to its absolute canonical form (resolving `..`, `.`, and
+symlinks) before the policy check. On Windows, paths are also lowercased before
+glob matching to prevent case-sensitivity bypass (`C:\Users\X` vs `c:\users\x`).
+
 Adding a built-in tool:
 1. Create `src/tools/builtin/my_tool.rs`
 2. Implement `McpTool`
@@ -668,6 +701,13 @@ Adding a built-in tool:
 External scripts/programs exposed as MCP tools. No Rust required.
 A generic `ScriptTool` struct implements `McpTool` and is driven entirely
 by a TOML definition file. See the **Script Tool Definitions** section.
+
+**Shell spawning ban**: `ScriptTool` always spawns the interpreter directly
+with the script as an argument — never via `sh -c` or `cmd.exe /c`. Shell
+spawning bypasses environment stripping (the shell inherits the parent
+environment) and makes resource declarations meaningless. Opt-in is available
+for advanced cases but requires explicit `allow_shell = true` in the tool
+definition and triggers a loud audit log warning.
 
 ---
 
@@ -1073,16 +1113,24 @@ beyond a single invocation:
 |---|---|
 | `once` | This invocation only (default) |
 | `minutes:N` | All matching invocations for N minutes |
-| `session` | Until server restart or config reload |
+| `session` | Until connection closes, config reloads, or inactivity timeout |
 
-Session approvals are keyed on `(key_id, tool_name, resource_pattern, perm)` —
-if any of those change, the cached approval does not apply.
-They are stored in memory only; they do not persist across restarts.
+Session approvals are keyed on `(connection_id, key_id, tool_name, resource_pattern, perm)`.
+
+- **Connection-scoped**: the `connection_id` is the SSE stream ID or stdio
+  session ID. If the connection drops and restarts, **all session approvals
+  for that connection are immediately cleared**. A fresh `initialize` starts
+  a new connection with no carried-over approvals.
+- **Inactivity expiry**: session approvals auto-expire after
+  `session_approval_inactivity_secs` of no matching invocations, even if the
+  connection is still open. Prevents long-idle sessions accumulating wide gates.
+- **Memory-only**: session approvals never persist to disk or survive restarts.
 
 ```toml
 [ui.confirm]
-timeout_secs             = 30
-session_approval_options = [5, 30, 0]   # minutes; 0 = session
+timeout_secs                    = 30
+session_approval_options        = [5, 30, 0]   # minutes; 0 = session
+session_approval_inactivity_secs = 300         # auto-expire idle session approvals
 ```
 
 ### Diff Preview
@@ -1096,12 +1144,14 @@ The `preview` field is informational — it does not affect enforcement.
 
 ### Security Properties
 
-- **Localhost-only** — confirm server binds `127.0.0.1` exclusively; not reachable from the network
+- **Localhost-only** — confirm server binds `127.0.0.1` exclusively
 - **One-time tokens** — each token is valid for exactly one approve/deny; replayed tokens are rejected
 - **HMAC-signed** — tokens cannot be forged without the server secret
 - **Auto-deny on expiry** — unanswered requests fail closed, not open
 - **Pending queue** — multiple concurrent confirm requests are queued; the UI lists all pending items
-- **PIN-gated admin** — config editing and key management require `ui.auth.pin`; confirm flow is separate and does not expose admin capabilities
+- **PIN-gated admin** — config editing and key management require `ui.auth.pin`; confirm flow does not expose admin capabilities
+- **Connection-scoped sessions** — session approvals clear immediately on disconnect; no approval survives a session restart
+- **Uniform deny responses** — in production, the error returned to the agent is identical whether the tool grant, deny rule, or grant rule caused the rejection. The audit log records the real reason; the wire response does not reveal policy structure.
 
 ---
 
@@ -1134,7 +1184,10 @@ Response
 ```
 pansophical/
 ├── src/
-│   ├── main.rs
+│   ├── main.rs              # CLI entry point
+│   │                        #   --init   generate config + server_secret, exit
+│   │                        #   --check  validate config, exit
+│   │                        #   (default) run server
 │   ├── protocol/        # MCP JSON-RPC protocol layer
 │   │   ├── lifecycle.rs # initialize/initialized/shutdown handshake
 │   │   ├── messages.rs  # MCP request/response/notification types
@@ -1171,8 +1224,27 @@ pansophical/
 
 ---
 
+## Implementation Priority
+
+Order modules in this sequence to reach a Minimum Viable Secure Server:
+
+| Priority | Module | Why |
+|---|---|---|
+| 1 | `authz` + `config` | If the intersection math is wrong, nothing else matters |
+| 2 | `transport/stdio` | Easiest to test with existing agents; no network needed |
+| 3 | `sandbox/linux` (Landlock) | Primary security claim; must be proven early |
+| 4 | `confirm/server` | Without it, all `w`/`x` confirm rules are hard-denies |
+| 5 | `tools/builtin` (`read_file`, `write_file`) | Validates the full pipeline end-to-end |
+| 6 | `sandbox/windows` (AppContainer) | Parity with Linux |
+| 7 | `transport/http` + SSE | Multi-agent, remote use cases |
+| 8 | `tools/script` + `protocol/resources` | Script tools + MCP Resources primitive |
+
+---
+
 ## Deferred / Open
 
 - [ ] Transitive resource access — mitigated by Layer 2 but not fully solved; document per-tool
 - [ ] Signing scheme upgrade path (HMAC / Ed25519)
 - [ ] First batch of utilities (post-framework review)
+- [ ] `resources/subscribe` — not Phase 1; revisit when resource streaming is needed
+- [ ] `db://` and message queue PolicyTargets — future resource types
