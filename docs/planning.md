@@ -24,7 +24,7 @@ A **local MCP (Model Context Protocol) server** written in Rust that:
 | Enforcement model | Key ceiling ∩ Tool needs = actual child grant |
 | Layer 2 sandboxing | Phase 1, not future |
 | Safety rails | Rate limits, timeouts, resource caps — configurable |
-| Human-in-the-loop | `confirm = true` on individual rules |
+| Human-in-the-loop | `confirm = true` on individual rules; always-on local confirm server |
 | First utilities | After framework is reviewed and stable |
 
 ---
@@ -494,6 +494,64 @@ config immediately after the swap.
 
 ---
 
+## Confirm Server
+
+A minimal HTTP server dedicated to human-in-the-loop approvals. It is
+**always running** on startup — no cold-start latency when the first
+approval is needed, and no code path that skips initialization.
+
+```toml
+[confirm]
+port         = 9765
+timeout_secs = 30    # auto-deny if no response within this window
+auto_open    = true  # open browser automatically; set false for headless/CI
+```
+
+### Flow
+
+```
+Tool invocation hits a rule with confirm = true
+        |
+        v
+Server generates a one-time token
+  - UUID + HMAC-signed with a server secret
+  - TTL = confirm.timeout_secs
+        |
+        v
+auto_open = true  →  open http://127.0.0.1:9765/confirm/<token>
+  (via `open` crate: xdg-open on Linux, start on Windows)
+        |
+        v
+Browser renders approval page:
+  Key:        ci_agent
+  Tool:       write_file
+  Resource:   filesystem  /workspace/src/main.rs
+  Permission: w
+  [⏱ 28s remaining]
+  [ APPROVE ]   [ DENY ]
+        |
+        v
+User clicks → POST /confirm/<token>/approve  (or /deny)
+        |
+        v
+Server unblocks the pending request
+  → approved: continue to spawn
+  → denied:   return 403, audit log entry
+        |
+        v
+TTL expires with no response → auto-deny + audit log entry
+```
+
+### Security Properties
+
+- **Localhost-only** — confirm server binds `127.0.0.1` exclusively; not reachable from the network
+- **One-time tokens** — each token is valid for exactly one approve/deny; replayed tokens are rejected
+- **HMAC-signed** — tokens cannot be forged without the server secret
+- **Auto-deny on expiry** — unanswered requests fail closed, not open
+- **Pending queue** — multiple concurrent confirm requests are queued and each gets its own page; the UI shows all pending items
+
+---
+
 ## Request Lifecycle
 
 ```
@@ -533,6 +591,10 @@ pansophical/
 │   │   └── windows.rs   # Job Objects + restricted token
 │   ├── reaper.rs        # Child process lifecycle + timeout enforcement
 │   ├── limits.rs        # Rate limiter + concurrency gate
+│   ├── confirm/         # Always-on approval server
+│   │   ├── server.rs    # HTTP listener on confirm.port
+│   │   ├── token.rs     # One-time token generation + HMAC validation
+│   │   └── ui.rs        # Embedded approval page HTML/CSS/JS
 │   ├── transport/
 │   │   ├── stdio.rs
 │   │   └── http.rs      # includes CORS enforcement
@@ -550,6 +612,5 @@ pansophical/
 ## Deferred / Open
 
 - [ ] Transitive resource access — mitigated by Layer 2 but not fully solved; document per-tool
-- [ ] `confirm = true` transport protocol — how does the server surface the approval request over stdio vs. HTTP?
 - [ ] Signing scheme upgrade path (HMAC / Ed25519)
 - [ ] First batch of utilities (post-framework review)
