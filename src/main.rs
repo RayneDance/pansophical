@@ -520,7 +520,8 @@ var_pattern = "HOSTNAME"
 # Add more keys for different agents or environments:
 #
 # [keys.production_agent]
-# token = "sk_live_replace_me"
+# token    = "sk_live_replace_me"
+# env_file = ".env"  # load env vars from a .env file (KEY=VALUE format)
 #
 # # Only allow specific tools.
 # [[keys.production_agent.rules]]

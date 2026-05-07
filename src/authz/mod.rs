@@ -154,17 +154,27 @@ pub fn evaluate(
     }
 }
 
-/// Collect environment variable grants from a key's policy rules.
+/// Collect environment variable grants from a key's policy rules and env_file.
 ///
-/// For each `type = "environment"` grant rule:
-/// - If `value` is set → inject that literal value
-/// - If `value` is absent → pass through from the server's parent environment
-/// - `var_pattern` supports exact names and trailing `*` wildcards (e.g. `API_*`)
+/// Sources (in order, later entries override earlier):
+/// 1. `env_file` — bulk loading from a `.env` file
+/// 2. Policy rules — `type = "environment"` grant rules (passthrough or explicit value)
 ///
 /// Returns `Vec<(var_name, var_value)>` ready for the reaper.
 pub fn collect_env_grants(key_config: &KeyConfig) -> Vec<(String, String)> {
     let mut env_vars = Vec::new();
 
+    // 1. Load from env_file if configured.
+    if let Some(ref env_file_path) = key_config.env_file {
+        match parse_env_file(env_file_path) {
+            Ok(vars) => env_vars.extend(vars),
+            Err(e) => {
+                tracing::warn!(path = %env_file_path, error = %e, "Failed to load env_file");
+            }
+        }
+    }
+
+    // 2. Collect from policy rules.
     for rule in &key_config.rules {
         if rule.effect != Effect::Grant {
             continue;
@@ -204,6 +214,54 @@ pub fn collect_env_grants(key_config: &KeyConfig) -> Vec<(String, String)> {
     }
 
     env_vars
+}
+
+/// Parse a `.env` file into a list of (key, value) pairs.
+///
+/// Supported format:
+/// ```text
+/// # Comment lines
+/// KEY=value
+/// QUOTED_KEY="value with spaces"
+/// SINGLE_QUOTED='literal $value'
+///
+/// # Empty lines are ignored
+/// EXPORT_KEY=value   # inline comments NOT supported (value includes everything after =)
+/// ```
+fn parse_env_file(path: &str) -> Result<Vec<(String, String)>, std::io::Error> {
+    let content = std::fs::read_to_string(path)?;
+    let mut vars = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // Skip empty lines and comments.
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Skip `export ` prefix (common in shell-compatible .env files).
+        let line = line.strip_prefix("export ").unwrap_or(line);
+
+        // Split on first `=`.
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim().to_string();
+            let mut value = value.trim().to_string();
+
+            // Strip surrounding quotes (double or single).
+            if (value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\''))
+            {
+                value = value[1..value.len() - 1].to_string();
+            }
+
+            if !key.is_empty() {
+                vars.push((key, value));
+            }
+        }
+    }
+
+    Ok(vars)
 }
 
 enum SingleResult {

@@ -13,6 +13,7 @@ fn key_with_rules(rules: Vec<PolicyRule>) -> KeyConfig {
     KeyConfig {
         token: "test_token".into(),
         rules,
+        env_file: None,
         limits: None,
     }
 }

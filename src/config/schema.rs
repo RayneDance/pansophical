@@ -267,6 +267,12 @@ pub struct KeyConfig {
     #[serde(default)]
     pub rules: Vec<PolicyRule>,
 
+    /// Path to a .env file to load environment variables from.
+    /// Variables are injected into child processes alongside rule-based grants.
+    /// Format: KEY=VALUE, one per line. Lines starting with # are comments.
+    #[serde(default)]
+    pub env_file: Option<String>,
+
     /// Per-key limit overrides.
     #[serde(default)]
     pub limits: Option<LimitsConfig>,
