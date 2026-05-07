@@ -403,29 +403,33 @@ async fn handle_tools_call(
                 .collect();
             let mut all_covered = !resource_requests.is_empty();
             for req in &resource_requests {
-                // Normalize path separators for matching.
-                let resource = req.resource.replace('\\', "/");
-                let cache_key = crate::confirm::session::ApprovalKey {
+                // Normalize path separators and case for matching (Windows is case-insensitive).
+                let resource = req.resource.replace('\\', "/").to_lowercase();
+                let generic_key = crate::confirm::session::ApprovalKey {
+                    connection_id: session.connection_id.clone(),
+                    key_name: session.key_name.clone(),
+                    tool_name: "*".to_string(),
+                    resource_pattern: resource.clone(),
+                    perm: req.perm.to_string(),
+                };
+                if confirm_state.approval_cache.check(&generic_key) {
+                    debug!(resource = %resource, "Ephemeral grant found");
+                    continue;
+                }
+                // Also try tool-specific key.
+                let specific_key = crate::confirm::session::ApprovalKey {
                     connection_id: session.connection_id.clone(),
                     key_name: session.key_name.clone(),
                     tool_name: tool_name.to_string(),
                     resource_pattern: resource.clone(),
                     perm: req.perm.to_string(),
                 };
-                if !confirm_state.approval_cache.check(&cache_key) {
-                    // Also try with just the resource (tool-agnostic grant).
-                    let generic_key = crate::confirm::session::ApprovalKey {
-                        connection_id: session.connection_id.clone(),
-                        key_name: session.key_name.clone(),
-                        tool_name: "*".to_string(),
-                        resource_pattern: resource.clone(),
-                        perm: req.perm.to_string(),
-                    };
-                    if !confirm_state.approval_cache.check(&generic_key) {
-                        all_covered = false;
-                        break;
-                    }
+                if confirm_state.approval_cache.check(&specific_key) {
+                    debug!(resource = %resource, tool = tool_name, "Ephemeral grant found (tool-specific)");
+                    continue;
                 }
+                all_covered = false;
+                break;
             }
 
             if all_covered {

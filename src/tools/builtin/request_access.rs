@@ -144,9 +144,18 @@ impl McpTool for RequestAccessTool {
                     connection_id: session_ctx.connection_id.clone(),
                     key_name: session_ctx.key_name.clone(),
                     tool_name: "*".to_string(),
-                    resource_pattern: resource.replace('\\', "/"),
+                    resource_pattern: resource.replace('\\', "/").to_lowercase(),
                     perm: permission.to_string(),
                 };
+
+                tracing::debug!(
+                    conn = %cache_key.connection_id,
+                    key = %cache_key.key_name,
+                    tool = %cache_key.tool_name,
+                    resource = %cache_key.resource_pattern,
+                    perm = %cache_key.perm,
+                    "Storing ephemeral grant in cache"
+                );
 
                 // Force at least 5 minutes for "Once" scope so the LLM
                 // has time to retry the operation.

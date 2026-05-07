@@ -11,14 +11,9 @@ pin = ""
 [keys.test]
 token = "test"
 
+# Only grant tool access — NO filesystem grants.
+# This forces list_dir to be denied, requiring request_access.
 [[keys.test.rules]]
 effect = "grant"
 type   = "tool"
 name   = "*"
-
-[[keys.test.rules]]
-effect = "grant"
-type   = "filesystem"
-path   = "E:/**"
-perm   = "r"
-confirm = true

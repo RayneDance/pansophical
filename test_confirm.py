@@ -1,83 +1,67 @@
 #!/usr/bin/env python3
-"""Minimal test harness for confirm flow — no LLM needed."""
+"""Minimal test: request_access then list_dir."""
 
-import json
-import subprocess
-import sys
-import threading
-import time
+import json, subprocess, sys, threading, time, os
 
 BINARY = r"target\debug\pansophical.exe"
 CONFIG = "config.toml"
 
-class McpTest:
+class Mcp:
     def __init__(self):
-        self.req_id = 0
+        self.rid = 0
+        env = os.environ.copy()
+        env["RUST_LOG"] = "debug"
         self.proc = subprocess.Popen(
             [BINARY, "--config", CONFIG],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1, env=env,
         )
-        self._stderr_lines = []
+        self._lines = []
         self._t = threading.Thread(target=self._drain, daemon=True)
         self._t.start()
         time.sleep(0.5)
-        if self.proc.poll() is not None:
-            print("Server died:", "\n".join(self._stderr_lines))
-            sys.exit(1)
 
     def _drain(self):
-        try:
-            for line in self.proc.stderr:
-                self._stderr_lines.append(line.rstrip())
-                # Print server logs in real time
-                print(f"  [server] {line.rstrip()}")
-                if len(self._stderr_lines) > 500:
-                    self._stderr_lines = self._stderr_lines[-200:]
-        except:
-            pass
+        for line in self.proc.stderr:
+            l = line.rstrip()
+            self._lines.append(l)
+            # Only print lines with our debug markers
+            if any(k in l for k in ["ephemeral", "Ephemeral", "Storing", "grant"]):
+                print(f"  [DBG] {l}")
+            elif "ERROR" in l or "WARN" in l:
+                print(f"  [LOG] {l}")
 
     def send(self, method, params=None):
-        self.req_id += 1
-        msg = {"jsonrpc": "2.0", "id": self.req_id, "method": method}
-        if params:
-            msg["params"] = params
-        line = json.dumps(msg)
-        print(f"  -> {method} (id={self.req_id})")
-        self.proc.stdin.write(line + "\n")
+        self.rid += 1
+        msg = {"jsonrpc": "2.0", "id": self.rid, "method": method}
+        if params: msg["params"] = params
+        self.proc.stdin.write(json.dumps(msg) + "\n")
         self.proc.stdin.flush()
         resp = self.proc.stdout.readline()
         if not resp:
-            print("Server closed stdout. Stderr:", "\n".join(self._stderr_lines[-20:]))
+            print("Server closed. Last stderr:")
+            for l in self._lines[-10:]: print(f"  {l}")
             sys.exit(1)
         data = json.loads(resp)
         if "error" in data:
-            print(f"  <- ERROR: {data['error']}")
+            print(f"  <- ERROR: {data['error']['message']}")
         else:
-            result = data.get("result", {})
-            # Truncate for display
-            text = json.dumps(result)
-            if len(text) > 200:
-                text = text[:200] + "..."
-            print(f"  <- OK: {text}")
+            r = data.get("result", {})
+            t = json.dumps(r)
+            print(f"  <- OK: {t[:120]}...")
         return data
 
     def notify(self, method, params=None):
         msg = {"jsonrpc": "2.0", "method": method}
-        if params:
-            msg["params"] = params
+        if params: msg["params"] = params
         self.proc.stdin.write(json.dumps(msg) + "\n")
         self.proc.stdin.flush()
 
 def main():
-    print("Starting MCP server...")
-    mcp = McpTest()
+    print("Starting server...")
+    mcp = Mcp()
 
-    # Initialize
-    resp = mcp.send("initialize", {
+    mcp.send("initialize", {
         "protocolVersion": "2024-11-05",
         "capabilities": {},
         "clientInfo": {"name": "test", "version": "0.1"},
@@ -85,39 +69,32 @@ def main():
     })
     mcp.notify("notifications/initialized")
 
-    # List tools
-    resp = mcp.send("tools/list")
-    tools = resp.get("result", {}).get("tools", [])
-    print(f"\n  Tools: {[t['name'] for t in tools]}\n")
+    print("\n--- Step 1: list_dir E:\\ (should be denied) ---")
+    mcp.send("tools/call", {"name": "builtin_list_dir", "arguments": {"path": "E:\\"}})
 
-    # Call a tool that should trigger confirm (or just execute)
-    print("Calling builtin_list_dir on E:/pansophical ...")
-    resp = mcp.send("tools/call", {
-        "name": "builtin_list_dir",
-        "arguments": {"path": "E:/pansophical"}
-    })
+    print("\n--- Step 2: request_access for E:\\ ---")
+    print("  (Approve this in the browser!)")
+    mcp.send("tools/call", {"name": "builtin_request_access", "arguments": {
+        "resource_type": "filesystem",
+        "resource": "E:\\",
+        "permission": "r",
+        "reason": "test"
+    }})
 
-    print("\nCall complete. Server still running — check browser for confirm page.")
-    print("Press Enter to call another tool, or Ctrl+C to quit.\n")
+    # Give the cache a moment
+    time.sleep(0.5)
 
-    try:
-        while True:
-            cmd = input("tool> ").strip()
-            if not cmd:
-                continue
-            if cmd == "quit":
-                break
-            # Parse: tool_name {"arg": "val"}
-            parts = cmd.split(" ", 1)
-            name = parts[0]
-            args = json.loads(parts[1]) if len(parts) > 1 else {}
-            mcp.send("tools/call", {"name": name, "arguments": args})
-    except (KeyboardInterrupt, EOFError):
-        pass
+    print("\n--- Step 3: list_dir E:\\ again (should work now) ---")
+    mcp.send("tools/call", {"name": "builtin_list_dir", "arguments": {"path": "E:\\"}})
 
-    print("\nShutting down...")
+    print("\nDone. Dumping ephemeral-related logs:")
+    for l in self._lines:
+        if any(k in l for k in ["ephemeral", "Ephemeral", "Storing", "grant", "cache"]):
+            print(f"  {l}")
+
     mcp.proc.stdin.close()
-    mcp.proc.wait(timeout=3)
+    try: mcp.proc.wait(timeout=3)
+    except: mcp.proc.kill()
 
 if __name__ == "__main__":
     main()
