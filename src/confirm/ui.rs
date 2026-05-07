@@ -633,13 +633,13 @@ pub fn dashboard_page(
   if (keyEntries.length === 0) {{
     keysBody.innerHTML = '<tr><td colspan="2" class="empty">No keys configured</td></tr>';
   }} else {{
-    keyEntries.forEach(([name, config]) => {{
-      const rules = (config.rules || []).map(r => {{
+    keyEntries.forEach(([name, rules]) => {{
+      const rulesHtml = (Array.isArray(rules) ? rules : []).map(r => {{
         const tag = r.effect === 'grant' ? 'tag-grant' : 'tag-deny';
         const detail = r.type === 'tool' ? r.name : (r.path || '') + ' ' + (r.perm || '');
         return `<span class="tag ${{tag}}">${{r.effect}}</span> ${{r.type}}: ${{detail}}`;
       }}).join('<br>');
-      keysBody.innerHTML += `<tr><td><strong>${{name}}</strong></td><td>${{rules || '<em>No rules</em>'}}</td></tr>`;
+      keysBody.innerHTML += `<tr><td><strong>${{name}}</strong></td><td>${{rulesHtml || '<em>No rules</em>'}}</td></tr>`;
     }});
   }}
 
