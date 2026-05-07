@@ -15,13 +15,14 @@ use tracing::{debug, error, info, warn};
 use crate::audit::{AuditEntry, AuditLog};
 use crate::authz::{self, AccessRequest, AuthzDecision};
 use crate::config::schema::Config;
+use crate::confirm::server::{ApprovalResult, ConfirmState};
 use crate::protocol::lifecycle::{self, LifecycleState};
 use crate::protocol::messages::*;
 use crate::session::Session;
 use crate::tools::ToolRegistry;
 
 /// Run the stdio transport loop. Blocks until stdin is closed.
-pub async fn run(config: Config, audit: Arc<AuditLog>) {
+pub async fn run(config: Config, audit: Arc<AuditLog>, confirm_state: Arc<ConfirmState>) {
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
@@ -77,7 +78,7 @@ pub async fn run(config: Config, audit: Arc<AuditLog>) {
                 };
 
                 // Dispatch.
-                let response = dispatch(&msg, &mut session, &config, &audit, &registry).await;
+                let response = dispatch(&msg, &mut session, &config, &audit, &registry, &confirm_state).await;
                 if let Some(response) = response {
                     write_response(&mut stdout, &response).await;
                 }
@@ -98,6 +99,7 @@ async fn dispatch(
     config: &Config,
     audit: &AuditLog,
     registry: &ToolRegistry,
+    confirm_state: &Arc<ConfirmState>,
 ) -> Option<Value> {
     let is_notification = msg.id.is_none();
     let id = msg.id.clone().unwrap_or(Value::Null);
@@ -179,7 +181,7 @@ async fn dispatch(
             if !is_initialized(session, &id) {
                 return Some(not_initialized_error(id));
             }
-            Some(handle_tools_call(id, msg.params.clone(), session, config, audit, registry).await)
+            Some(handle_tools_call(id, msg.params.clone(), session, config, audit, registry, confirm_state).await)
         }
 
         // ── Shutdown ──────────────────────────────────────────────────
@@ -226,6 +228,7 @@ async fn handle_tools_call(
     config: &Config,
     audit: &AuditLog,
     registry: &ToolRegistry,
+    confirm_state: &Arc<ConfirmState>,
 ) -> Value {
     let params = match params {
         Some(p) => p,
@@ -298,9 +301,51 @@ async fn handle_tools_call(
     match decision {
         AuthzDecision::Granted { requires_confirm, .. } => {
             if requires_confirm {
-                // HITL confirmation will be implemented in Phase 7.
-                // For now, log and proceed.
-                warn!(tool = tool_name, "Confirm required but not yet implemented — proceeding");
+                // HITL: request human confirmation before executing.
+                let resource_desc = access_requests
+                    .iter()
+                    .filter(|r| r.target_type != crate::config::policy_target::PolicyTargetType::Tool)
+                    .map(|r| r.resource.clone())
+                    .next()
+                    .unwrap_or_else(|| tool_name.to_string());
+                let perm_desc = access_requests
+                    .iter()
+                    .filter(|r| r.target_type != crate::config::policy_target::PolicyTargetType::Tool)
+                    .map(|r| r.perm.to_string())
+                    .next()
+                    .unwrap_or_default();
+
+                let result = crate::confirm::server::request_confirmation(
+                    confirm_state,
+                    tool_name,
+                    &resource_desc,
+                    &perm_desc,
+                    &session.key_name,
+                    &session.connection_id,
+                    config.limits.tool_timeout_secs,
+                    config.ui.port,
+                )
+                .await;
+
+                match result {
+                    ApprovalResult::Denied => {
+                        audit.log(
+                            &AuditEntry::new(&session.connection_id, &session.key_name)
+                                .with_tool(tool_name)
+                                .with_decision("denied")
+                                .with_detail("confirm denied by user"),
+                        );
+                        return serde_json::to_value(JsonRpcError::new(
+                            id,
+                            error_codes::CONFIRM_DENIED,
+                            "confirmation denied by user",
+                        ))
+                        .unwrap();
+                    }
+                    ApprovalResult::Approved(_) => {
+                        // Fall through to execution.
+                    }
+                }
             }
 
             // Audit: granted.

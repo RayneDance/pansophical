@@ -1,9 +1,10 @@
-//! Always-on human-in-the-loop approval server.
+//! Human-in-the-loop confirmation system.
 //!
-//! Runs on `127.0.0.1:ui.port` and serves approval pages
-//! for `confirm = true` policy rules.
+//! When a tool call matches a `confirm = true` policy rule, the server
+//! pauses execution and opens a browser approval page. The user can
+//! approve or deny the action with a scoped TTL.
 
 pub mod server;
+pub mod session;
 pub mod token;
 pub mod ui;
-pub mod session;

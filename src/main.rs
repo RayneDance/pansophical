@@ -133,11 +133,41 @@ fn run_server(path: &PathBuf) -> Result<()> {
         config.server.transport,
     ));
 
+    // Create the approval cache and confirm state.
+    let approval_cache = Arc::new(confirm::session::ApprovalCache::new());
+    let confirm_state = Arc::new(confirm::server::ConfirmState::new(
+        Arc::clone(&approval_cache),
+        Arc::clone(&audit),
+        config.server.server_secret.clone(),
+    ));
+
     match config.server.transport.as_str() {
         "stdio" => {
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| PansophicalError::Other(format!("failed to create runtime: {e}")))?;
-            rt.block_on(transport::stdio::run(config, audit));
+            rt.block_on(async {
+                // Start the confirm server as a background task.
+                let confirm_port = config.ui.port;
+                let confirm_state_bg = Arc::clone(&confirm_state);
+                tokio::spawn(async move {
+                    confirm::server::start(confirm_state_bg, confirm_port).await;
+                });
+
+                // Start the approval cache sweeper (every 30s).
+                let cache_sweep = Arc::clone(&approval_cache);
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                        let swept = cache_sweep.sweep_expired();
+                        if swept > 0 {
+                            tracing::debug!(swept, "Swept expired approvals");
+                        }
+                    }
+                });
+
+                // Run the stdio transport.
+                transport::stdio::run(config, audit, confirm_state).await;
+            });
         }
         "http" | "both" => {
             info!("HTTP transport not yet implemented (Phase 10)");
