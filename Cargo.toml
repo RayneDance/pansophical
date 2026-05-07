@@ -2,5 +2,53 @@
 name = "pansophical"
 version = "0.1.0"
 edition = "2024"
+description = "Security-first MCP server with intersection-based authorization"
+license = "MIT"
 
 [dependencies]
+# Async runtime
+tokio          = { version = "1", features = ["full"] }
+tokio-util     = "0.7"
+
+# Serialization
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+toml           = "0.8"
+
+# CLI
+clap           = { version = "4", features = ["derive"] }
+
+# Auth primitives
+bitflags       = "2"
+hmac           = "0.12"
+sha2           = "0.10"
+uuid           = { version = "1", features = ["v4"] }
+
+# Observability
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# File watching (hot reload)
+notify         = "6"
+
+# HTTP server (confirm server + HTTP transport)
+axum           = "0.7"
+
+# Concurrent data structures
+dashmap        = "6"
+
+# Glob matching
+globset        = "0.4"
+
+# Browser open (confirm server)
+open           = "5"
+
+# Random secret generation
+rand           = "0.8"
+base64         = "0.22"
+
+# Timestamps
+chrono         = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror      = "2"
