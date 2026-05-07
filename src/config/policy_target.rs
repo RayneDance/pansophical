@@ -48,6 +48,10 @@ pub struct PolicyRule {
     #[serde(default)]
     pub var_pattern: Option<String>,
 
+    /// environment: explicit value to inject (if absent, passes through from parent env)
+    #[serde(default)]
+    pub value: Option<String>,
+
     /// process: name pattern
     #[serde(default)]
     pub name_pattern: Option<String>,

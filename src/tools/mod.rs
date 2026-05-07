@@ -29,11 +29,15 @@ pub trait McpTool: Send + Sync {
 
     /// Execute the tool. Only called if authorization succeeded.
     ///
+    /// `granted_env` contains environment variables to inject into child processes,
+    /// collected from the key's `type = "environment"` policy rules.
+    ///
     /// Returns MCP-compliant content (TextContent, ImageContent, etc.).
     async fn execute(
         &self,
         params: &Value,
         config: &Config,
+        granted_env: &[(String, String)],
     ) -> Result<Value, String>;
 }
 

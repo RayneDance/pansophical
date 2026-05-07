@@ -285,7 +285,7 @@ async fn handle_tools_call(
             if config.keys.is_empty() {
                 // No keys configured — skip authz for development.
                 // Execute directly.
-                return execute_tool(id, tool, &arguments, config, audit, session, tool_name).await;
+                return execute_tool(id, tool, &arguments, config, audit, session, tool_name, &[]).await;
             }
             return serde_json::to_value(JsonRpcError::new(
                 id,
@@ -356,7 +356,10 @@ async fn handle_tools_call(
                     .with_access_requests(serde_json::to_value(&access_requests).unwrap()),
             );
 
-            execute_tool(id, tool, &arguments, config, audit, session, tool_name).await
+            // Collect environment variable grants from the key's rules.
+            let env_grants = authz::collect_env_grants(key_config);
+
+            execute_tool(id, tool, &arguments, config, audit, session, tool_name, &env_grants).await
         }
         AuthzDecision::Denied { explain } => {
             // Audit: denied.
@@ -400,8 +403,9 @@ async fn execute_tool(
     audit: &AuditLog,
     session: &Session,
     tool_name: &str,
+    granted_env: &[(String, String)],
 ) -> Value {
-    match tool.execute(arguments, config).await {
+    match tool.execute(arguments, config, granted_env).await {
         Ok(result) => {
             audit.log(
                 &AuditEntry::new(&session.connection_id, &session.key_name)

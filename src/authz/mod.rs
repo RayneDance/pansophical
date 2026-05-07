@@ -154,6 +154,58 @@ pub fn evaluate(
     }
 }
 
+/// Collect environment variable grants from a key's policy rules.
+///
+/// For each `type = "environment"` grant rule:
+/// - If `value` is set → inject that literal value
+/// - If `value` is absent → pass through from the server's parent environment
+/// - `var_pattern` supports exact names and trailing `*` wildcards (e.g. `API_*`)
+///
+/// Returns `Vec<(var_name, var_value)>` ready for the reaper.
+pub fn collect_env_grants(key_config: &KeyConfig) -> Vec<(String, String)> {
+    let mut env_vars = Vec::new();
+
+    for rule in &key_config.rules {
+        if rule.effect != Effect::Grant {
+            continue;
+        }
+        if rule.target_type != PolicyTargetType::Environment {
+            continue;
+        }
+
+        let pattern = match rule.var_pattern.as_deref() {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if let Some(ref value) = rule.value {
+            // Explicit value — inject directly.
+            // Don't expand wildcards for explicit values.
+            if !pattern.contains('*') {
+                env_vars.push((pattern.to_string(), value.clone()));
+            }
+        } else {
+            // Passthrough — read from parent env.
+            if pattern.ends_with('*') {
+                // Wildcard: match all env vars starting with the prefix.
+                let prefix = &pattern[..pattern.len() - 1];
+                for (key, val) in std::env::vars() {
+                    if key.starts_with(prefix) {
+                        env_vars.push((key, val));
+                    }
+                }
+            } else {
+                // Exact match.
+                if let Ok(val) = std::env::var(pattern) {
+                    env_vars.push((pattern.to_string(), val));
+                }
+            }
+        }
+    }
+
+    env_vars
+}
+
 enum SingleResult {
     Granted { actual_perm: Perm, confirm: bool },
     Denied(String),

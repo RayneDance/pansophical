@@ -541,11 +541,14 @@ var_pattern = "HOSTNAME"
 # perm   = "r"
 #
 # # Inject env vars into tool processes (e.g., API keys, config).
+# # With value: injects the literal value into the child process.
 # [[keys.production_agent.rules]]
 # effect      = "grant"
 # type        = "environment"
 # var_pattern = "DATABASE_URL"
+# value       = "postgres://localhost:5432/mydb"
 #
+# # Without value: passes through from the server's parent env.
 # [[keys.production_agent.rules]]
 # effect      = "grant"
 # type        = "environment"

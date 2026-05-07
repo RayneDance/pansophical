@@ -397,7 +397,7 @@ async fn handle_tools_call_http(
         Some((_, kc)) => kc,
         None => {
             if config.keys.is_empty() {
-                return execute_tool_http(id, tool, &arguments, config, audit, session, tool_name).await;
+                return execute_tool_http(id, tool, &arguments, config, audit, session, tool_name, &[]).await;
             }
             return serde_json::to_value(JsonRpcError::new(
                 id,
@@ -466,7 +466,9 @@ async fn handle_tools_call_http(
                     .with_access_requests(serde_json::to_value(&access_requests).unwrap()),
             );
 
-            execute_tool_http(id, tool, &arguments, config, audit, session, tool_name).await
+            let env_grants = authz::collect_env_grants(key_config);
+
+            execute_tool_http(id, tool, &arguments, config, audit, session, tool_name, &env_grants).await
         }
         AuthzDecision::Denied { explain } => {
             let detail = if let Some(ref diff) = explain {
@@ -509,8 +511,9 @@ async fn execute_tool_http(
     audit: &AuditLog,
     session: &Session,
     tool_name: &str,
+    granted_env: &[(String, String)],
 ) -> Value {
-    match tool.execute(arguments, config).await {
+    match tool.execute(arguments, config, granted_env).await {
         Ok(result) => {
             audit.log(
                 &AuditEntry::new(&session.connection_id, &session.key_name)

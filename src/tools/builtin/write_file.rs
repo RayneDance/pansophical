@@ -74,6 +74,7 @@ impl McpTool for WriteFileTool {
         &self,
         params: &Value,
         _config: &Config,
+        _granted_env: &[(String, String)],
     ) -> Result<Value, String> {
         let path = params
             .get("path")

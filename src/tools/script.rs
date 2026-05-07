@@ -263,6 +263,7 @@ impl McpTool for ScriptTool {
         &self,
         params: &Value,
         config: &Config,
+        granted_env: &[(String, String)],
     ) -> Result<Value, String> {
         // Validate all arguments.
         if let Some(args) = params.as_object() {
@@ -284,12 +285,11 @@ impl McpTool for ScriptTool {
         }
 
         // Spawn via the reaper.
-        let env_grants: Vec<(String, String)> = Vec::new();
         let result = crate::reaper::spawn_and_reap(
             &self.def.command,
             &cmd_args,
             &config.sandbox,
-            &env_grants,
+            granted_env,
             config.limits.tool_timeout_secs,
             config.limits.max_output_bytes,
         )

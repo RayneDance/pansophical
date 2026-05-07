@@ -31,6 +31,7 @@ fn fs_grant(path: &str, perm: Perm) -> PolicyRule {
         protocol: None,
         url_pattern: None,
         var_pattern: None,
+        value: None,
         name_pattern: None,
         name: None,
     }
@@ -50,6 +51,7 @@ fn fs_deny(path: &str, perm: Perm) -> PolicyRule {
         protocol: None,
         url_pattern: None,
         var_pattern: None,
+        value: None,
         name_pattern: None,
         name: None,
     }
@@ -70,6 +72,7 @@ fn tool_grant(name: &str) -> PolicyRule {
         protocol: None,
         url_pattern: None,
         var_pattern: None,
+        value: None,
         name_pattern: None,
     }
 }

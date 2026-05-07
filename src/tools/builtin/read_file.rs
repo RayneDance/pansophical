@@ -63,6 +63,7 @@ impl McpTool for ReadFileTool {
         &self,
         params: &Value,
         config: &Config,
+        _granted_env: &[(String, String)],
     ) -> Result<Value, String> {
         let path = params
             .get("path")
