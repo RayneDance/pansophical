@@ -27,6 +27,29 @@ use crate::config::policy_target::{Effect, PolicyTargetType};
 use crate::config::perm::Perm;
 use crate::config::schema::KeyConfig;
 
+// ── Task-local sandbox profile ────────────────────────────────────────────────
+//
+// The transport layer sets this before calling tool.execute(). The reaper
+// reads it when spawning a sandboxed child. This avoids adding a parameter
+// to the McpTool trait.
+
+tokio::task_local! {
+    static CURRENT_PROFILE: SandboxProfile;
+}
+
+/// Run a closure with a sandbox profile set for the current task.
+pub async fn with_profile<F, R>(profile: SandboxProfile, f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    CURRENT_PROFILE.scope(profile, f).await
+}
+
+/// Get the current task's sandbox profile (if set).
+pub fn current_profile() -> Option<SandboxProfile> {
+    CURRENT_PROFILE.try_with(|p| p.clone()).ok()
+}
+
 /// Filesystem access profile for a sandboxed child process.
 ///
 /// Constructed from authz grants + tool resource declarations + config defaults.

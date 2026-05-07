@@ -359,7 +359,14 @@ async fn handle_tools_call(
             // Collect environment variable grants from the key's rules.
             let env_grants = authz::collect_env_grants(key_config);
 
-            execute_tool(id, tool, &arguments, config, audit, session, tool_name, &env_grants).await
+            // Build sandbox profile from the key's filesystem grants.
+            let sandbox_profile = crate::sandbox::SandboxProfile::from_key_config(key_config);
+
+            // Execute with the sandbox profile set in the task-local.
+            crate::sandbox::with_profile(
+                sandbox_profile,
+                execute_tool(id, tool, &arguments, config, audit, session, tool_name, &env_grants),
+            ).await
         }
         AuthzDecision::Denied { explain } => {
             // Audit: denied.

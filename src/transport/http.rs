@@ -468,7 +468,12 @@ async fn handle_tools_call_http(
 
             let env_grants = authz::collect_env_grants(key_config);
 
-            execute_tool_http(id, tool, &arguments, config, audit, session, tool_name, &env_grants).await
+            let sandbox_profile = crate::sandbox::SandboxProfile::from_key_config(key_config);
+
+            crate::sandbox::with_profile(
+                sandbox_profile,
+                execute_tool_http(id, tool, &arguments, config, audit, session, tool_name, &env_grants),
+            ).await
         }
         AuthzDecision::Denied { explain } => {
             let detail = if let Some(ref diff) = explain {
