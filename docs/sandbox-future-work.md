@@ -104,18 +104,19 @@ Restrict child processes from making network connections:
 - **Fallback**: Use Job Object `JOB_OBJECT_NET_RATE_CONTROL_FLAGS` (limited)
 
 
-### Tool Namespacing
+### Tool Namespacing ✅
 
-Resolve tool name collisions by prepending group prefix:
-- Builtins: `builtin_read_file`, `builtin_write_file`, etc.
-- Script tools without a defined group: `ext_<name>` (e.g. `ext_read_file`)
+Tool name collisions prevented by group prefix:
+- Builtins: `builtin_read_file`, `builtin_write_file`, `builtin_list_dir`, `builtin_request_access`
+- Script tools: `{group}_{name}` (defaults to `ext_{name}` if no group specified)
 - Allows both a builtin and script tool with the same base name to coexist
+- Tests: `default_namespace_is_ext`, `custom_group_namespace`
 
 
 ## Priority Order
 
 1. ~~**Linux Landlock**~~ — ✅ done
-2. **Tool namespacing** — prevents collisions, improves clarity
+2. ~~**Tool namespacing**~~ — ✅ done
 3. ~~**Read-path enforcement**~~ — ✅ done (AppContainer + Landlock)
-4. **Network isolation** — defense-in-depth, platform-dependent
+4. **Network isolation** — defense-in-depth, platform-dependent (only remaining item)
 
