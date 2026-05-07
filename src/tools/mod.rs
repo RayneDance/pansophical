@@ -63,6 +63,11 @@ impl ToolRegistry {
         registry.register(Box::new(builtin::read_file::ReadFileTool));
         registry.register(Box::new(builtin::write_file::WriteFileTool));
         registry.register(Box::new(builtin::list_dir::ListDirTool));
+        registry.register(Box::new(builtin::file_info::FileInfoTool));
+        registry.register(Box::new(builtin::search_files::SearchFilesTool));
+        registry.register(Box::new(builtin::create_directory::CreateDirectoryTool));
+        registry.register(Box::new(builtin::move_file::MoveFileTool));
+        registry.register(Box::new(builtin::delete_file::DeleteFileTool));
 
         registry
     }

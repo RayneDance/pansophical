@@ -5,3 +5,8 @@ pub mod read_file;
 pub mod write_file;
 pub mod list_dir;
 pub mod request_access;
+pub mod file_info;
+pub mod search_files;
+pub mod create_directory;
+pub mod move_file;
+pub mod delete_file;

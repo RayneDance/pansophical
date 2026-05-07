@@ -171,9 +171,15 @@ Agent request
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read file contents (requires `r` permission on path) |
-| `write_file` | Write file contents (requires `w` permission on path) |
-| `list_dir` | List directory contents (requires `r` permission on path) |
+| `builtin_read_file` | Read file contents (requires `r` permission on path) |
+| `builtin_write_file` | Write file contents (requires `w` permission on path) |
+| `builtin_list_dir` | List directory contents (requires `r` permission on path) |
+| `builtin_file_info` | Get file/directory metadata — size, type, modified time (requires `r`) |
+| `builtin_search_files` | Recursive text search in files under a directory (requires `r`) |
+| `builtin_create_directory` | Create a directory and parents (requires `w` permission) |
+| `builtin_move_file` | Move or rename a file/directory (requires `w` on source and destination) |
+| `builtin_delete_file` | Delete a file or empty directory (requires `w` permission) |
+| `builtin_request_access` | Request ephemeral filesystem access from the admin |
 
 ## CLI flags
 
