@@ -504,6 +504,17 @@ type   = "filesystem"
 path   = "**"
 perm   = "rw"
 
+# Allow tools to see common environment variables.
+[[keys.demo.rules]]
+effect      = "grant"
+type        = "environment"
+var_pattern = "USER"
+
+[[keys.demo.rules]]
+effect      = "grant"
+type        = "environment"
+var_pattern = "HOSTNAME"
+
 # ── Additional Keys ───────────────────────────────────────────────────────────
 #
 # Add more keys for different agents or environments:
@@ -511,6 +522,7 @@ perm   = "rw"
 # [keys.production_agent]
 # token = "sk_live_replace_me"
 #
+# # Only allow specific tools.
 # [[keys.production_agent.rules]]
 # effect = "grant"
 # type   = "tool"
@@ -518,9 +530,33 @@ perm   = "rw"
 #
 # [[keys.production_agent.rules]]
 # effect = "grant"
+# type   = "tool"
+# name   = "list_dir"
+#
+# # Restrict filesystem to a specific workspace.
+# [[keys.production_agent.rules]]
+# effect = "grant"
 # type   = "filesystem"
 # path   = "C:/Projects/my_workspace/**"
 # perm   = "r"
+#
+# # Inject env vars into tool processes (e.g., API keys, config).
+# [[keys.production_agent.rules]]
+# effect      = "grant"
+# type        = "environment"
+# var_pattern = "DATABASE_URL"
+#
+# [[keys.production_agent.rules]]
+# effect      = "grant"
+# type        = "environment"
+# var_pattern = "API_*"    # wildcard: all vars starting with API_
+#
+# # Allow running git but require human confirmation.
+# [[keys.production_agent.rules]]
+# effect     = "grant"
+# type       = "program"
+# executable = "git"
+# confirm    = true
 "##
     )
 }
