@@ -126,15 +126,23 @@ required    = true
         ("git_status.toml", r#"# ══════════════════════════════════════════════════════════════
 # Example: Git Status
 # ══════════════════════════════════════════════════════════════
-# Reports the git status of the current directory.
-# No agent-supplied arguments — fully locked down.
+# Reports git status for a specific directory.
+# Uses {path} interpolation to place the argument in the right position.
 
+group           = "devops"
 name            = "git_status"
-description     = "Show git status in short format"
+description     = "Show git status for a directory"
 command         = "git"
-args            = ["status", "--short"]
+args            = ["-C", "{path}", "status", "--short"]
 allow_shell     = false
 arg_passthrough = false
+
+# The {path} placeholder above is replaced with this parameter's value.
+# Without interpolation, parameters are appended at the end.
+[[parameters]]
+name        = "path"
+description = "Directory to check (absolute path)"
+required    = true
 "#),
         ("disk_usage.toml", r#"# ══════════════════════════════════════════════════════════════
 # Example: Disk Usage

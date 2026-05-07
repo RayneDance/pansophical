@@ -183,6 +183,56 @@ impl ScriptTool {
 
         Ok(())
     }
+
+    /// Build the final argument list with `{param}` interpolation.
+    ///
+    /// Placeholders like `{path}` in `self.def.args` are replaced with agent-supplied
+    /// values. Parameters not referenced by any placeholder are appended at the end.
+    fn build_args(&self, params: &Value) -> Result<Vec<String>, String> {
+        let mut interpolated_params = std::collections::HashSet::new();
+        let mut cmd_args = Vec::with_capacity(self.def.args.len() + self.def.parameters.len());
+
+        for arg_template in &self.def.args {
+            let mut result = arg_template.clone();
+            let mut had_placeholder = false;
+
+            for param in &self.def.parameters {
+                let placeholder = format!("{{{}}}", param.name);
+                if result.contains(&placeholder) {
+                    had_placeholder = true;
+                    if let Some(value) = params.get(&param.name).and_then(|v| v.as_str()) {
+                        result = result.replace(&placeholder, value);
+                        interpolated_params.insert(param.name.clone());
+                    } else if param.required {
+                        return Err(format!("missing required argument: {}", param.name));
+                    } else {
+                        result = String::new();
+                        break;
+                    }
+                }
+            }
+
+            if had_placeholder && result.is_empty() {
+                continue;
+            }
+
+            cmd_args.push(result);
+        }
+
+        // Append parameters that were NOT interpolated (backward compat).
+        for param in &self.def.parameters {
+            if interpolated_params.contains(&param.name) {
+                continue;
+            }
+            if let Some(value) = params.get(&param.name).and_then(|v| v.as_str()) {
+                cmd_args.push(value.to_string());
+            } else if param.required {
+                return Err(format!("missing required argument: {}", param.name));
+            }
+        }
+
+        Ok(cmd_args)
+    }
 }
 
 #[async_trait]
@@ -294,15 +344,8 @@ impl McpTool for ScriptTool {
             }
         }
 
-        // Build the argument list: static args + dynamic args from parameters.
-        let mut cmd_args = self.def.args.clone();
-        for param in &self.def.parameters {
-            if let Some(value) = params.get(&param.name).and_then(|v| v.as_str()) {
-                cmd_args.push(value.to_string());
-            } else if param.required {
-                return Err(format!("missing required argument: {}", param.name));
-            }
-        }
+        // Build the argument list with {param} interpolation.
+        let cmd_args = self.build_args(params)?;
 
         // Spawn via the reaper.
         let result = crate::reaper::spawn_and_reap(
@@ -512,5 +555,83 @@ allow_shell = true
         let tool = make_tool(def);
         assert_eq!(tool.name(), "devops_test_tool");
         assert_eq!(tool.groups(), vec!["devops".to_string()]);
+    }
+
+    // ── Argument interpolation tests ─────────────────────────────────────
+
+    fn make_interpolation_def() -> ScriptToolDefinition {
+        ScriptToolDefinition {
+            name: "git_status".into(),
+            description: "Git status for a dir".into(),
+            group: Some("devops".into()),
+            command: "git".into(),
+            args: vec!["-C".into(), "{path}".into(), "status".into(), "--short".into()],
+            allow_shell: false,
+            arg_passthrough: false,
+            streaming: false,
+            parameters: vec![ScriptParam {
+                name: "path".into(),
+                description: "Dir to check".into(),
+                param_type: "string".into(),
+                required: true,
+                allow_flags: false,
+            }],
+            resources: vec![],
+        }
+    }
+
+    #[test]
+    fn interpolation_replaces_placeholder() {
+        let tool = make_tool(make_interpolation_def());
+        let params = json!({"path": "/workspace"});
+        let args = tool.build_args(&params).unwrap();
+        assert_eq!(args, vec!["-C", "/workspace", "status", "--short"]);
+    }
+
+    #[test]
+    fn interpolation_missing_required_errors() {
+        let tool = make_tool(make_interpolation_def());
+        let params = json!({});
+        let result = tool.build_args(&params);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing required argument"));
+    }
+
+    #[test]
+    fn no_placeholder_appends_at_end() {
+        // Old-style: no {param} in args → appended at the end.
+        let tool = make_tool(make_def());
+        let params = json!({"input": "world"});
+        let args = tool.build_args(&params).unwrap();
+        assert_eq!(args, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn mixed_interpolation_and_append() {
+        let mut def = make_interpolation_def();
+        // Add a second param that is NOT referenced in args.
+        def.parameters.push(ScriptParam {
+            name: "extra".into(),
+            description: "Extra arg".into(),
+            param_type: "string".into(),
+            required: false,
+            allow_flags: false,
+        });
+        let tool = make_tool(def);
+        let params = json!({"path": "/ws", "extra": "verbose"});
+        let args = tool.build_args(&params).unwrap();
+        // "path" is interpolated into position, "extra" appended at end.
+        assert_eq!(args, vec!["-C", "/ws", "status", "--short", "verbose"]);
+    }
+
+    #[test]
+    fn optional_placeholder_skips_arg() {
+        let mut def = make_interpolation_def();
+        def.parameters[0].required = false;
+        let tool = make_tool(def);
+        let params = json!({});
+        let args = tool.build_args(&params).unwrap();
+        // {path} not supplied → that arg is skipped entirely.
+        assert_eq!(args, vec!["-C", "status", "--short"]);
     }
 }
