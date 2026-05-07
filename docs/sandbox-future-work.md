@@ -24,14 +24,13 @@ Reference implementation: `src/sandbox/linux.rs` (file exists, currently empty)
 - No cleanup needed — rules are per-process and die with the child
 
 
-## Phase 4: Windows AppContainer (Strongest Isolation)
+## Phase 4: Windows AppContainer (Strongest Isolation) - ✅ DONE
 
 AppContainer provides the strongest possible sandbox on Windows, even on
 elevated/admin sessions. It blocks ALL filesystem access except paths with
 an explicit ACE for the container's SID.
 
-### Steps
-
+### Steps Implemented
 1. `CreateAppContainerProfile` — create a named container (e.g., `pansophical-<key>-<tool>`)
 2. Get the container SID via `DeriveAppContainerSidFromAppContainerName`
 3. For each allowed path, add an ACE granting the container SID access:
@@ -72,6 +71,5 @@ Restrict child processes from making network connections:
 ## Priority Order
 
 1. **Linux Landlock** — high value, moderate complexity
-2. **Windows AppContainer** — highest isolation, high complexity
-3. **Read-path enforcement** — fills a gap, varies by platform
-4. **Network isolation** — defense-in-depth, platform-dependent
+2. **Read-path enforcement** — fills a gap, varies by platform
+3. **Network isolation** — defense-in-depth, platform-dependent

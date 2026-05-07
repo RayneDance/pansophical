@@ -22,19 +22,21 @@ use crate::confirm::ui;
 
 /// The result sent back through the oneshot channel.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ApprovalResult {
     Approved(ApprovalScope),
     Denied,
 }
 
 /// A pending confirmation request.
-struct PendingConfirm {
+pub(crate) struct PendingConfirm {
     sender: oneshot::Sender<ApprovalResult>,
     tool_name: String,
     resource: String,
     perm: String,
     key_name: String,
     connection_id: String,
+    #[allow(dead_code)]
     token_str: String,
     ttl_secs: u64,
 }

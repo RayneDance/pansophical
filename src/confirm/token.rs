@@ -96,6 +96,7 @@ impl ConfirmToken {
     }
 
     /// Time remaining before expiry.
+    #[allow(dead_code)]
     pub fn ttl(&self) -> Duration {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

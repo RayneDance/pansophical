@@ -28,7 +28,9 @@ pub enum ReapResult {
     },
     /// Child was killed due to timeout.
     TimedOut {
+        #[allow(dead_code)]
         stdout: Vec<u8>,
+        #[allow(dead_code)]
         stderr: Vec<u8>,
     },
     /// Failed to spawn.
@@ -654,7 +656,7 @@ mod tests {
         let result = spawn_and_reap("cmd", &args, &sandbox, &[], 5, 65536).await;
 
         match result {
-            ReapResult::Completed { exit_code, stdout, .. } => {
+            ReapResult::Completed { stdout, .. } => {
                 let out = String::from_utf8_lossy(&stdout);
                 // The output should contain "Low Mandatory Level" for the sandboxed process.
                 assert!(

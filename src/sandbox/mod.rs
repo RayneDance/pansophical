@@ -63,6 +63,7 @@ pub struct SandboxProfile {
     /// Paths the child is allowed to execute.
     pub exec_paths: Vec<PathBuf>,
     /// Whether the sandbox is enabled.
+    #[allow(dead_code)]
     pub enabled: bool,
 }
 
@@ -78,6 +79,7 @@ impl SandboxProfile {
     }
 
     /// Create a disabled profile (no sandbox enforcement).
+    #[allow(dead_code)]
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -138,6 +140,7 @@ impl SandboxProfile {
     }
 
     /// Add the tool's command binary to the exec paths.
+    #[allow(dead_code)]
     pub fn add_executable(&mut self, program: &str) {
         let path = PathBuf::from(program);
         if path.is_absolute() {

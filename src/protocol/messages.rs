@@ -11,6 +11,7 @@ use serde_json::Value;
 /// An incoming JSON-RPC message (request or notification).
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcMessage {
+    #[allow(dead_code)]
     pub jsonrpc: String,
     /// Present for requests; absent for notifications.
     #[serde(default)]
@@ -95,8 +96,10 @@ pub mod error_codes {
     /// Authorization error: insufficient permissions.
     pub const UNAUTHORIZED: i32 = -32001;
     /// Rate limited.
+    #[allow(dead_code)]
     pub const RATE_LIMITED: i32 = -32002;
     /// Concurrency limit exceeded.
+    #[allow(dead_code)]
     pub const CONCURRENCY_EXCEEDED: i32 = -32003;
     /// Confirmation denied or timed out.
     pub const CONFIRM_DENIED: i32 = -32004;

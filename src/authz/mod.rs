@@ -58,6 +58,7 @@ pub struct GrantResult {
     /// The actual permissions granted (intersection of needs and grants).
     pub actual_perm: Perm,
     /// Whether any matching rule has `confirm = true`.
+    #[allow(dead_code)]
     pub requires_confirm: bool,
 }
 

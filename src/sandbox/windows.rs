@@ -10,7 +10,7 @@
 //! falls back to a "best-effort" approach using Rust `std` primitives.
 
 use std::io;
-use tracing::{info, warn};
+use tracing::info;
 
 /// A Windows Job Object handle wrapper.
 ///
@@ -37,6 +37,7 @@ pub(crate) mod win32 {
 
     // Win32 constants.
     pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x00002000;
+    #[allow(dead_code)]
     pub const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: u32 = 0x00000008;
     pub const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
 
@@ -232,9 +233,12 @@ mod restricted {
     // Low integrity SID: S-1-16-4096
     const SECURITY_MANDATORY_LOW_RID: u32 = 0x1000;
 
+    #[allow(dead_code)]
     const LOGON_WITH_PROFILE: u32 = 0x1;
+    #[allow(dead_code)]
     const LOGON_NETCREDENTIALS_ONLY: u32 = 0x2;
     const CREATE_UNICODE_ENVIRONMENT: u32 = 0x00000400;
+    #[allow(dead_code)]
     const CREATE_NEW_CONSOLE: u32 = 0x00000010;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     const STARTF_USESTDHANDLES: u32 = 0x00000100;
@@ -562,7 +566,7 @@ pub mod appcontainer {
     use std::{io, ptr};
 
     use super::restricted::{
-        build_env_block, ProcessInformation, SecurityAttributes, StartupInfoW,
+        ProcessInformation, SecurityAttributes, StartupInfoW,
     };
 
     // ── Constants ────────────────────────────────────────────────────────────
@@ -579,6 +583,7 @@ pub mod appcontainer {
 
     // HRESULT values
     const S_OK: i32 = 0;
+    #[allow(dead_code)]
     const E_ALREADY_EXISTS: i32 = -2147023436_i32; // 0x800700B7
 
     // ── FFI Types ────────────────────────────────────────────────────────────

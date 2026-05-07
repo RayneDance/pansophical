@@ -42,10 +42,12 @@ pub enum LimitCheck {
     Allowed(ConcurrencyGuard),
     /// Rate limited.
     RateLimited {
+        #[allow(dead_code)]
         retry_after_secs: u64,
     },
     /// Concurrency limit exceeded.
     ConcurrencyExceeded {
+        #[allow(dead_code)]
         current: u32,
         max: u32,
     },
@@ -81,6 +83,7 @@ impl ConcurrencyGuard {
     }
 
     /// Get the max output bytes limit.
+    #[allow(dead_code)]
     pub fn max_output_bytes(&self) -> u64 {
         self.max_output_bytes
     }

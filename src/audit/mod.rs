@@ -103,6 +103,7 @@ impl AuditEntry {
     }
 
     /// Set actual grant (serialized from GrantResult vec).
+    #[allow(dead_code)]
     pub fn with_actual_grant(mut self, grant: Value) -> Self {
         self.actual_grant = Some(grant);
         self
