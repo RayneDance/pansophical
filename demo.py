@@ -279,19 +279,29 @@ def main():
         sys.exit(1)
 
     # Read MCP token from config.toml.
-    mcp_token = None
-    try:
-        with open(args.config, "r") as f:
-            config_text = f.read()
-        # Simple extraction: find first `token = "..."` in a [keys.*] section.
-        match = re.search(r'\[keys\.\w+\]\s*\n\s*token\s*=\s*"([^"]+)"', config_text)
-        if match:
-            mcp_token = match.group(1)
-            cprint(C.DIM, f"  Using token from config: {mcp_token[:12]}...")
-        else:
-            cprint(C.YELLOW, "  ⚠ No key token found in config — server may reject requests")
-    except Exception as e:
-        cprint(C.YELLOW, f"  ⚠ Could not read config for token: {e}")
+    mcp_token = os.environ.get("PANSOPHICAL_TOKEN", "")
+    if not mcp_token:
+        try:
+            with open(args.config, "r") as f:
+                config_text = f.read()
+            # Find any `token = "..."` line in a [keys.*] section.
+            # Handles comments and blank lines between header and token.
+            match = re.search(
+                r'\[keys\.\w+\].*?\ntoken\s*=\s*"([^"]+)"',
+                config_text,
+                re.DOTALL,
+            )
+            if match:
+                mcp_token = match.group(1)
+        except Exception:
+            pass
+
+    if mcp_token:
+        cprint(C.DIM, f"  Using token: {mcp_token[:16]}...")
+    else:
+        cprint(C.YELLOW, "  No key token found in config.")
+        cprint(C.YELLOW, "  Paste a token from your config.toml [keys.*] section, or press Enter to try without:")
+        mcp_token = input(f"  {C.DIM}token>{C.RESET} ").strip() or None
 
     # Initialize.
     try:
