@@ -1,6 +1,61 @@
-# Pansophical Sandbox — Future Work
+# Pansophical Sandbox — Status & Future Work
 
-## Phase 3: Linux Landlock
+## Completed
+
+### Phase 0–2: Windows Low Integrity Restricted Token ✅
+
+- Spawns child processes with a **Low Integrity restricted token** via
+  `CreateProcessAsUserW` with `DISABLE_MAX_PRIVILEGE`
+- Write-path enforcement via integrity labels on granted directories
+- Falls back to unsandboxed execution if token creation fails
+- Job Object assignment for process lifetime management
+
+### Phase 4: Windows AppContainer (Strongest Isolation) ✅
+
+AppContainer provides the strongest possible sandbox on Windows, even on
+elevated/admin sessions. It blocks ALL filesystem access except paths with
+an explicit ACE for the container's SID.
+
+**Implementation** (`src/sandbox/windows.rs`):
+1. `CreateAppContainerProfile` — creates a unique container per tool invocation
+2. Container SID obtained from the profile for ACE grants
+3. For each allowed path, adds an ACE granting the container SID access:
+   - Write paths → `FILE_GENERIC_READ | FILE_GENERIC_WRITE`
+   - Read paths → `FILE_GENERIC_READ`
+4. `InitializeProcThreadAttributeList` + `UpdateProcThreadAttribute`
+   with `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
+5. `CreateProcessW` with `EXTENDED_STARTUPINFO_PRESENT`
+6. RAII cleanup: removes ACEs and deletes container profile on drop
+
+**Integration** (`src/reaper.rs`):
+- AppContainer is the **primary** sandbox strategy
+- Falls back to Low Integrity Restricted Token if AppContainer fails
+- Falls back to unsandboxed if both fail
+
+### Authorization Glob Matching Fix ✅
+
+Fixed two bugs in `path_matches_glob` (`src/authz/glob.rs`):
+1. **Slash normalization**: Windows `canonicalize()` produces backslash paths
+   but config patterns use forward slashes. Both are now normalized to `/`
+   before matching.
+2. **Directory root matching**: A `/**` pattern now also matches the directory
+   itself (e.g., `E:/pansof/**` grants access to both `E:/pansof` and its
+   contents). Previously, `list_dir` on the root of a grant was always denied.
+
+### Demo Harness: Vertex AI Migration ✅
+
+- Migrated `demo.py` from Google Gemini Developer API to **Vertex AI**
+- Authentication via `gcloud` CLI (no API key needed)
+- Uses `gcloud.cmd` on Windows to avoid `WinError 2`
+- Added animated spinner during API calls for visual feedback
+- Timeout increased from 60s → 120s for large tool result payloads
+
+
+---
+
+## Future Work
+
+### Phase 3: Linux Landlock
 
 For Linux kernel 5.13+ (available on most modern distros):
 
@@ -16,7 +71,7 @@ For Linux kernel 5.13+ (available on most modern distros):
 
 Reference implementation: `src/sandbox/linux.rs` (file exists, currently empty)
 
-### Key differences from Windows
+#### Key differences from Windows
 
 - Landlock is **path-based** — no need for integrity labels or token manipulation
 - Rules are inherited by children automatically
@@ -24,42 +79,18 @@ Reference implementation: `src/sandbox/linux.rs` (file exists, currently empty)
 - No cleanup needed — rules are per-process and die with the child
 
 
-## Phase 4: Windows AppContainer (Strongest Isolation) - ✅ DONE
+### Phase 5: Read-path Enforcement
 
-AppContainer provides the strongest possible sandbox on Windows, even on
-elevated/admin sessions. It blocks ALL filesystem access except paths with
-an explicit ACE for the container's SID.
-
-### Steps Implemented
-1. `CreateAppContainerProfile` — create a named container (e.g., `pansophical-<key>-<tool>`)
-2. Get the container SID via `DeriveAppContainerSidFromAppContainerName`
-3. For each allowed path, add an ACE granting the container SID access:
-   - Write paths → `FILE_GENERIC_READ | FILE_GENERIC_WRITE`
-   - Read paths → `FILE_GENERIC_READ`
-4. Use `InitializeProcThreadAttributeList` + `UpdateProcThreadAttribute`
-   with `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
-5. Call `CreateProcessW` with `EXTENDED_STARTUPINFO_PRESENT`
-6. After process exits: remove ACEs, delete container profile
-
-### Why this matters
-
-On elevated (admin) sessions, the current Low Integrity approach does NOT
-reliably block writes to paths without explicit integrity labels. AppContainer
-solves this by denying ALL access by default and requiring explicit grants.
-
-
-## Phase 5: Read-path Enforcement
-
-Currently, read paths are collected in the `SandboxProfile` but not enforced
-at the OS level. The child process can read any file the user can read.
+Currently, read paths are collected in the `SandboxProfile` but only enforced
+by AppContainer. The Low Integrity fallback does not restrict reads.
 
 - **Linux**: Add Landlock read rules (straightforward)
-- **Windows Low IL**: Read access is generally not restricted by integrity level.
-  AppContainer would enforce read restrictions.
-- **Windows AppContainer**: Read paths would get read-only ACEs for the container SID.
+- **Windows Low IL**: Read access is not restricted by integrity level.
+  AppContainer enforces read restrictions via ACEs (already implemented).
+- **Windows AppContainer**: ✅ Read paths get read-only ACEs for the container SID.
 
 
-## Phase 6: Network Isolation
+### Phase 6: Network Isolation
 
 Restrict child processes from making network connections:
 
@@ -71,5 +102,5 @@ Restrict child processes from making network connections:
 ## Priority Order
 
 1. **Linux Landlock** — high value, moderate complexity
-2. **Read-path enforcement** — fills a gap, varies by platform
+2. **Read-path enforcement** — partially done (AppContainer), needs Landlock + Low IL
 3. **Network isolation** — defense-in-depth, platform-dependent
