@@ -6,17 +6,20 @@
 //! Reads one JSON-RPC message per line from stdin, dispatches it,
 //! and writes the response to stdout.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
 
+use crate::audit::{AuditEntry, AuditLog};
 use crate::config::schema::Config;
 use crate::protocol::lifecycle::{self, LifecycleState};
 use crate::protocol::messages::*;
 use crate::session::Session;
 
 /// Run the stdio transport loop. Blocks until stdin is closed.
-pub async fn run(config: Config) {
+pub async fn run(config: Config, audit: Arc<AuditLog>) {
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
@@ -26,6 +29,10 @@ pub async fn run(config: Config) {
         connection_id = %session.connection_id,
         "Stdio transport started"
     );
+    audit.log_event("transport_start", &format!(
+        "stdio transport started, connection_id={}",
+        session.connection_id
+    ));
 
     let mut line = String::new();
 
@@ -38,6 +45,10 @@ pub async fn run(config: Config) {
                     connection_id = %session.connection_id,
                     "Stdin closed — shutting down"
                 );
+                audit.log_event("transport_close", &format!(
+                    "stdin closed, connection_id={}",
+                    session.connection_id
+                ));
                 break;
             }
             Ok(_) => {
@@ -63,7 +74,7 @@ pub async fn run(config: Config) {
                 };
 
                 // Dispatch.
-                if let Some(response) = dispatch(&msg, &mut session, &config) {
+                if let Some(response) = dispatch(&msg, &mut session, &config, &audit) {
                     write_response(&mut stdout, &response).await;
                 }
                 // Notifications (id == None) don't get responses.
@@ -77,7 +88,12 @@ pub async fn run(config: Config) {
 }
 
 /// Dispatch a JSON-RPC message and return an optional response.
-fn dispatch(msg: &JsonRpcMessage, session: &mut Session, config: &Config) -> Option<Value> {
+fn dispatch(
+    msg: &JsonRpcMessage,
+    session: &mut Session,
+    config: &Config,
+    audit: &AuditLog,
+) -> Option<Value> {
     let is_notification = msg.id.is_none();
     let id = msg.id.clone().unwrap_or(Value::Null);
 
@@ -101,6 +117,15 @@ fn dispatch(msg: &JsonRpcMessage, session: &mut Session, config: &Config) -> Opt
             match result {
                 Ok((key_name, token)) => {
                     session.bind(key_name, token);
+
+                    // Audit: successful auth.
+                    audit.log(
+                        &AuditEntry::new(&session.connection_id, &session.key_name)
+                            .with_decision("granted")
+                            .with_event("initialize")
+                            .with_detail("session initialized"),
+                    );
+
                     Some(
                         serde_json::to_value(JsonRpcResponse::new(
                             id,
@@ -109,7 +134,17 @@ fn dispatch(msg: &JsonRpcMessage, session: &mut Session, config: &Config) -> Opt
                         .unwrap(),
                     )
                 }
-                Err(err) => Some(serde_json::to_value(err).unwrap()),
+                Err(err) => {
+                    // Audit: failed auth.
+                    audit.log(
+                        &AuditEntry::new(&session.connection_id, "unknown")
+                            .with_decision("denied")
+                            .with_event("initialize")
+                            .with_detail(&err.error.message),
+                    );
+
+                    Some(serde_json::to_value(err).unwrap())
+                }
             }
         }
 
@@ -139,6 +174,12 @@ fn dispatch(msg: &JsonRpcMessage, session: &mut Session, config: &Config) -> Opt
         "shutdown" => {
             session.state = LifecycleState::ShuttingDown;
             info!(connection_id = %session.connection_id, "Shutdown requested");
+            audit.log(
+                &AuditEntry::new(&session.connection_id, &session.key_name)
+                    .with_event("shutdown")
+                    .with_decision("n/a")
+                    .with_detail("client requested shutdown"),
+            );
             Some(
                 serde_json::to_value(JsonRpcResponse::new(id, Value::Null))
                     .unwrap(),

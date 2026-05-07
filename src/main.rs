@@ -111,6 +111,8 @@ fn run_check(path: &PathBuf) -> Result<()> {
 
 /// Default server mode: load config and run the transport loop.
 fn run_server(path: &PathBuf) -> Result<()> {
+    use std::sync::Arc;
+
     if !path.exists() {
         return Err(PansophicalError::ConfigNotFound {
             path: path.display().to_string(),
@@ -123,11 +125,19 @@ fn run_server(path: &PathBuf) -> Result<()> {
     info!("Config: {}", path.display());
     info!("Transport: {}", config.server.transport);
 
+    // Create the audit log.
+    let audit = Arc::new(audit::AuditLog::new(&config.audit));
+    audit.log_event("startup", &format!(
+        "Pansophical v{} starting, transport={}",
+        env!("CARGO_PKG_VERSION"),
+        config.server.transport,
+    ));
+
     match config.server.transport.as_str() {
         "stdio" => {
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| PansophicalError::Other(format!("failed to create runtime: {e}")))?;
-            rt.block_on(transport::stdio::run(config));
+            rt.block_on(transport::stdio::run(config, audit));
         }
         "http" | "both" => {
             info!("HTTP transport not yet implemented (Phase 10)");
