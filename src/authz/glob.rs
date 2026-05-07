@@ -44,11 +44,14 @@ pub fn canonical_path_for_create(path: &Path) -> Result<PathBuf> {
 }
 
 /// Platform-specific normalization.
-/// On Windows: lowercase the path for case-insensitive glob matching.
+/// On Windows: strip the `\\?\` extended path prefix and lowercase.
 fn normalize_for_platform(path: PathBuf) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        PathBuf::from(path.to_string_lossy().to_lowercase())
+        let s = path.to_string_lossy().to_string();
+        // Strip the extended path prefix that canonicalize() adds on Windows.
+        let stripped = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        PathBuf::from(stripped.to_lowercase())
     }
     #[cfg(not(target_os = "windows"))]
     {

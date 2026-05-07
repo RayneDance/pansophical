@@ -115,7 +115,9 @@ pub fn handle_initialize(
 }
 
 /// Handle `tools/list` request.
-pub fn handle_tools_list(id: Value) -> Value {
-    let result = ToolsListResult { tools: vec![] };
+pub fn handle_tools_list(id: Value, registry: &crate::tools::ToolRegistry) -> Value {
+    let result = ToolsListResult {
+        tools: registry.list(),
+    };
     serde_json::to_value(JsonRpcResponse::new(id, serde_json::to_value(result).unwrap())).unwrap()
 }

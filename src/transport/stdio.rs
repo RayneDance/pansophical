@@ -13,10 +13,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
 
 use crate::audit::{AuditEntry, AuditLog};
+use crate::authz::{self, AccessRequest, AuthzDecision};
 use crate::config::schema::Config;
 use crate::protocol::lifecycle::{self, LifecycleState};
 use crate::protocol::messages::*;
 use crate::session::Session;
+use crate::tools::ToolRegistry;
 
 /// Run the stdio transport loop. Blocks until stdin is closed.
 pub async fn run(config: Config, audit: Arc<AuditLog>) {
@@ -24,6 +26,7 @@ pub async fn run(config: Config, audit: Arc<AuditLog>) {
     let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
     let mut session = Session::new();
+    let registry = ToolRegistry::new();
 
     info!(
         connection_id = %session.connection_id,
@@ -74,7 +77,8 @@ pub async fn run(config: Config, audit: Arc<AuditLog>) {
                 };
 
                 // Dispatch.
-                if let Some(response) = dispatch(&msg, &mut session, &config, &audit) {
+                let response = dispatch(&msg, &mut session, &config, &audit, &registry).await;
+                if let Some(response) = response {
                     write_response(&mut stdout, &response).await;
                 }
                 // Notifications (id == None) don't get responses.
@@ -88,11 +92,12 @@ pub async fn run(config: Config, audit: Arc<AuditLog>) {
 }
 
 /// Dispatch a JSON-RPC message and return an optional response.
-fn dispatch(
+async fn dispatch(
     msg: &JsonRpcMessage,
     session: &mut Session,
     config: &Config,
     audit: &AuditLog,
+    registry: &ToolRegistry,
 ) -> Option<Value> {
     let is_notification = msg.id.is_none();
     let id = msg.id.clone().unwrap_or(Value::Null);
@@ -167,7 +172,14 @@ fn dispatch(
             if !is_initialized(session, &id) {
                 return Some(not_initialized_error(id));
             }
-            Some(lifecycle::handle_tools_list(id))
+            Some(lifecycle::handle_tools_list(id, registry))
+        }
+
+        "tools/call" => {
+            if !is_initialized(session, &id) {
+                return Some(not_initialized_error(id));
+            }
+            Some(handle_tools_call(id, msg.params.clone(), session, config, audit, registry).await)
         }
 
         // ── Shutdown ──────────────────────────────────────────────────
@@ -202,6 +214,186 @@ fn dispatch(
                     .unwrap(),
                 )
             }
+        }
+    }
+}
+
+/// Handle `tools/call` — the core authz + execution pipeline.
+async fn handle_tools_call(
+    id: Value,
+    params: Option<Value>,
+    session: &Session,
+    config: &Config,
+    audit: &AuditLog,
+    registry: &ToolRegistry,
+) -> Value {
+    let params = match params {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(JsonRpcError::new(
+                id,
+                error_codes::INVALID_PARAMS,
+                "tools/call requires params",
+            ))
+            .unwrap();
+        }
+    };
+
+    // Extract tool name.
+    let tool_name = match params.get("name").and_then(|v| v.as_str()) {
+        Some(name) => name,
+        None => {
+            return serde_json::to_value(JsonRpcError::new(
+                id,
+                error_codes::INVALID_PARAMS,
+                "tools/call requires 'name' in params",
+            ))
+            .unwrap();
+        }
+    };
+
+    // Find the tool.
+    let tool = match registry.get(tool_name) {
+        Some(t) => t,
+        None => {
+            return serde_json::to_value(JsonRpcError::new(
+                id,
+                error_codes::METHOD_NOT_FOUND,
+                format!("unknown tool: {tool_name}"),
+            ))
+            .unwrap();
+        }
+    };
+
+    // Extract arguments.
+    let arguments = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+
+    // ── Step 1: Build access requests ─────────────────────────────────
+    let mut access_requests = tool.access_requests(&arguments);
+
+    // Always require tool meta-authorization.
+    access_requests.push(AccessRequest::tool(tool_name));
+
+    // ── Step 2: Evaluate against key's policy ─────────────────────────
+    let key_config = match config.resolve_key(&session.token) {
+        Some((_, kc)) => kc,
+        None => {
+            // Anonymous session — check if keys exist at all.
+            if config.keys.is_empty() {
+                // No keys configured — skip authz for development.
+                // Execute directly.
+                return execute_tool(id, tool, &arguments, config, audit, session, tool_name).await;
+            }
+            return serde_json::to_value(JsonRpcError::new(
+                id,
+                error_codes::AUTH_ERROR,
+                "session key not found",
+            ))
+            .unwrap();
+        }
+    };
+
+    let decision = authz::evaluate(&access_requests, key_config, config.server.dev_mode);
+
+    match decision {
+        AuthzDecision::Granted { requires_confirm, .. } => {
+            if requires_confirm {
+                // HITL confirmation will be implemented in Phase 7.
+                // For now, log and proceed.
+                warn!(tool = tool_name, "Confirm required but not yet implemented — proceeding");
+            }
+
+            // Audit: granted.
+            audit.log(
+                &AuditEntry::new(&session.connection_id, &session.key_name)
+                    .with_tool(tool_name)
+                    .with_decision("granted")
+                    .with_access_requests(serde_json::to_value(&access_requests).unwrap()),
+            );
+
+            execute_tool(id, tool, &arguments, config, audit, session, tool_name).await
+        }
+        AuthzDecision::Denied { explain } => {
+            // Audit: denied.
+            let detail = if let Some(ref diff) = explain {
+                serde_json::to_string(diff).unwrap_or_default()
+            } else {
+                "denied".to_string()
+            };
+
+            audit.log(
+                &AuditEntry::new(&session.connection_id, &session.key_name)
+                    .with_tool(tool_name)
+                    .with_decision("denied")
+                    .with_detail(&detail),
+            );
+
+            if let Some(diff) = explain {
+                serde_json::to_value(
+                    JsonRpcError::new(id, error_codes::UNAUTHORIZED, "authorization denied")
+                        .with_data(serde_json::to_value(diff).unwrap()),
+                )
+                .unwrap()
+            } else {
+                serde_json::to_value(JsonRpcError::new(
+                    id,
+                    error_codes::UNAUTHORIZED,
+                    "authorization denied",
+                ))
+                .unwrap()
+            }
+        }
+    }
+}
+
+/// Execute a tool after authorization has been granted.
+async fn execute_tool(
+    id: Value,
+    tool: &dyn crate::tools::McpTool,
+    arguments: &Value,
+    config: &Config,
+    audit: &AuditLog,
+    session: &Session,
+    tool_name: &str,
+) -> Value {
+    match tool.execute(arguments, config).await {
+        Ok(content) => {
+            audit.log(
+                &AuditEntry::new(&session.connection_id, &session.key_name)
+                    .with_tool(tool_name)
+                    .with_decision("granted")
+                    .with_outcome("success"),
+            );
+
+            serde_json::to_value(JsonRpcResponse::new(
+                id,
+                serde_json::json!({
+                    "content": content,
+                    "isError": false
+                }),
+            ))
+            .unwrap()
+        }
+        Err(err) => {
+            audit.log(
+                &AuditEntry::new(&session.connection_id, &session.key_name)
+                    .with_tool(tool_name)
+                    .with_decision("granted")
+                    .with_outcome("error")
+                    .with_detail(&err),
+            );
+
+            serde_json::to_value(JsonRpcResponse::new(
+                id,
+                serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": err
+                    }],
+                    "isError": true
+                }),
+            ))
+            .unwrap()
         }
     }
 }

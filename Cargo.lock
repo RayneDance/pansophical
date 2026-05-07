@@ -887,6 +887,7 @@ dependencies = [
 name = "pansophical"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "bitflags 2.11.1",
