@@ -59,3 +59,8 @@ thiserror      = "2"
 
 # Async trait (dyn-compatible async methods)
 async-trait    = "0.1"
+
+# Linux sandbox (Landlock filesystem restrictions)
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock        = "0.4"
+libc            = "0.2"

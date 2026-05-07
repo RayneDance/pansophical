@@ -91,7 +91,15 @@ pub async fn spawn_and_reap(
         }
     }
 
-    // Normal spawn (fallback / Linux / sandbox disabled).
+    // Try sandboxed spawn on Linux (Landlock).
+    #[cfg(target_os = "linux")]
+    if sandbox_config.enabled {
+        if let Some(profile) = crate::sandbox::current_profile() {
+            return spawn_landlock_linux(program, args, &env_vars, timeout_secs, max_output_bytes, &profile).await;
+        }
+    }
+
+    // Normal spawn (fallback / sandbox disabled / no profile).
     spawn_normal(program, args, &env_vars, timeout_secs, max_output_bytes).await
 }
 
@@ -183,6 +191,75 @@ async fn spawn_normal(
         }
         Err(_) => {
             warn!(program = program, timeout_secs = timeout_secs, "Child timed out — killing");
+            if let Err(e) = child.kill().await { error!("Failed to kill child: {e}"); }
+            let _ = child.wait().await;
+            let stdout = read_pipe(&mut child_stdout, max_output_bytes).await;
+            let stderr = read_pipe(&mut child_stderr, max_output_bytes).await;
+            ReapResult::TimedOut { stdout, stderr }
+        }
+    }
+}
+
+// ── Linux Landlock Spawn ──────────────────────────────────────────────────────
+
+/// Spawn a child with Landlock filesystem restrictions (Linux only).
+///
+/// Uses `pre_exec` to apply:
+/// 1. `PR_SET_PDEATHSIG(SIGKILL)` — child dies when parent dies
+/// 2. Landlock ruleset — restricts filesystem access to paths in the profile
+#[cfg(target_os = "linux")]
+async fn spawn_landlock_linux(
+    program: &str,
+    args: &[String],
+    env_vars: &[(String, String)],
+    timeout_secs: u64,
+    max_output_bytes: u64,
+    profile: &crate::sandbox::SandboxProfile,
+) -> ReapResult {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    cmd.env_clear();
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.stdin(Stdio::null());
+
+    // Configure the Landlock sandbox via pre_exec hook.
+    // Safety: pre_exec runs after fork(), before exec(). The landlock crate
+    // only uses syscalls. PR_SET_PDEATHSIG is async-signal-safe.
+    unsafe {
+        crate::sandbox::linux::configure_sandbox(cmd.as_std_mut(), profile);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return ReapResult::SpawnFailed(format!("failed to spawn '{}': {e}", program));
+        }
+    };
+
+    info!(program = program, sandboxed = true, "Child spawned with Landlock sandbox");
+
+    let mut child_stdout = child.stdout.take();
+    let mut child_stderr = child.stderr.take();
+
+    let duration = Duration::from_secs(timeout_secs);
+    let wait_result = timeout(duration, child.wait()).await;
+
+    match wait_result {
+        Ok(Ok(status)) => {
+            let stdout = read_pipe(&mut child_stdout, max_output_bytes).await;
+            let stderr = read_pipe(&mut child_stderr, max_output_bytes).await;
+            ReapResult::Completed { exit_code: status.code(), stdout, stderr }
+        }
+        Ok(Err(e)) => {
+            error!(program = program, "Child wait error: {e}");
+            ReapResult::SpawnFailed(format!("child wait error: {e}"))
+        }
+        Err(_) => {
+            warn!(program = program, timeout_secs = timeout_secs, "Sandboxed child timed out — killing");
             if let Err(e) = child.kill().await { error!("Failed to kill child: {e}"); }
             let _ = child.wait().await;
             let stdout = read_pipe(&mut child_stdout, max_output_bytes).await;

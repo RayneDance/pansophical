@@ -55,28 +55,33 @@ Fixed two bugs in `path_matches_glob` (`src/authz/glob.rs`):
 
 ## Future Work
 
-### Phase 3: Linux Landlock
+### Phase 3: Linux Landlock ✅
 
-For Linux kernel 5.13+ (available on most modern distros):
+Implemented Landlock filesystem sandboxing for Linux (kernel 5.13+):
 
-1. **Create a Landlock ruleset** via `landlock_create_ruleset` syscall
-   - Define handled access rights (read, write, execute, etc.)
-2. **Add path-beneath rules** for each path in `SandboxProfile`
-   - `write_paths` → `LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_*`
-   - `read_paths` → `LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR`
-   - `exec_paths` → `LANDLOCK_ACCESS_FS_EXECUTE`
-3. **Enforce** via `landlock_restrict_self` in a `pre_exec` hook on the child process
-4. **Fallback**: If Landlock is not available (old kernel), log a warning and
-   run unsandboxed (same pattern as Windows restricted token fallback)
+**Implementation** (`src/sandbox/linux.rs`):
+1. `configure_sandbox()` installs a `pre_exec` hook on the child `Command`
+2. Sets `PR_SET_PDEATHSIG(SIGKILL)` — child is killed if server dies
+3. Builds a Landlock ruleset from the `SandboxProfile`:
+   - `read_paths` → `AccessFs::from_read(ABI::V4)` (read files, list dirs)
+   - `write_paths` → `AccessFs::from_all(ABI::V4)` (full read+write+create)
+   - `exec_paths` → read + `AccessFs::Execute`
+4. Always allows: `/proc` (read), `/dev/null|urandom|zero` (read),
+   `/dev/pts` (read+write), `/tmp` (read+write)
+5. Enforces via `restrict_self()` — rules apply to the child and all its descendants
+6. Falls back to unsandboxed if Landlock is unavailable (old kernel, disabled LSM)
 
-Reference implementation: `src/sandbox/linux.rs` (file exists, currently empty)
+**Integration** (`src/reaper.rs`):
+- Landlock sandbox spawns via `spawn_landlock_linux()` when `sandbox.enabled = true`
+  and a `SandboxProfile` is available from the task-local
+- Falls back to normal unsandboxed spawn if no profile exists
+- Same timeout + output cap semantics as Windows sandbox paths
 
-#### Key differences from Windows
-
-- Landlock is **path-based** — no need for integrity labels or token manipulation
-- Rules are inherited by children automatically
-- Works regardless of whether the server runs as root or unprivileged
-- No cleanup needed — rules are per-process and die with the child
+**Key advantages over Windows approach:**
+- Path-based — no integrity labels, tokens, or ACE manipulation needed
+- Rules are per-process and inherited by children — no cleanup
+- Works for unprivileged processes (no root required)
+- Simple `pre_exec` hook — no platform-specific API surface
 
 
 ### Phase 5: Read-path Enforcement
@@ -84,7 +89,7 @@ Reference implementation: `src/sandbox/linux.rs` (file exists, currently empty)
 Currently, read paths are collected in the `SandboxProfile` but only enforced
 by AppContainer. The Low Integrity fallback does not restrict reads.
 
-- **Linux**: Add Landlock read rules (straightforward)
+- **Linux**: ✅ Landlock read rules enforce read-only access
 - **Windows Low IL**: Read access is not restricted by integrity level.
   AppContainer enforces read restrictions via ACEs (already implemented).
 - **Windows AppContainer**: ✅ Read paths get read-only ACEs for the container SID.
@@ -109,7 +114,8 @@ Resolve tool name collisions by prepending group prefix:
 
 ## Priority Order
 
-1. **Linux Landlock** — high value, moderate complexity
+1. ~~**Linux Landlock**~~ — ✅ done
 2. **Tool namespacing** — prevents collisions, improves clarity
-3. **Read-path enforcement** — partially done (AppContainer), needs Landlock + Low IL
+3. ~~**Read-path enforcement**~~ — ✅ done (AppContainer + Landlock)
 4. **Network isolation** — defense-in-depth, platform-dependent
+
