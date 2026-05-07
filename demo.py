@@ -216,20 +216,22 @@ def main():
     parser.add_argument("--binary", default=None, help="Path to pansophical binary")
     args = parser.parse_args()
 
-    # Find the binary.
+    # Find the binary — check cwd first, then target/.
+    search = [
+        "pansophical.exe",
+        "pansophical",
+        "target/release/pansophical.exe",
+        "target/debug/pansophical.exe",
+        "target/release/pansophical",
+        "target/debug/pansophical",
+    ]
     if args.binary:
         binary = args.binary
-    elif os.path.exists("target/release/pansophical.exe"):
-        binary = "target/release/pansophical.exe"
-    elif os.path.exists("target/debug/pansophical.exe"):
-        binary = "target/debug/pansophical.exe"
-    elif os.path.exists("target/release/pansophical"):
-        binary = "target/release/pansophical"
-    elif os.path.exists("target/debug/pansophical"):
-        binary = "target/debug/pansophical"
     else:
-        cprint(C.RED, "Error: Could not find pansophical binary. Build first: cargo build")
-        sys.exit(1)
+        binary = next((p for p in search if os.path.exists(p)), None)
+        if binary is None:
+            cprint(C.RED, "Error: Could not find pansophical binary. Build first: cargo build")
+            sys.exit(1)
 
     # Banner.
     print()
