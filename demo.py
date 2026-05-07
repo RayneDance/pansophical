@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Pansophical Demo — Gemini + MCP Tool-Calling Harness
+Pansophical Demo — Vertex AI + MCP Tool-Calling Harness
 
-A minimal CLI that connects an LLM (Google Gemini) to Pansophical's
+A minimal CLI that connects an LLM (Vertex AI) to Pansophical's
 MCP server, demonstrating the full authorization and tool-calling pipeline.
 
 Usage:
@@ -15,6 +15,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 import urllib.error
 import argparse
@@ -48,6 +50,34 @@ class C:
 
 def cprint(color, text, end="\n"):
     print(f"{color}{text}{C.RESET}", end=end)
+
+class Spinner:
+    """Animated spinner shown while waiting for the API."""
+    FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+
+    def __init__(self, label="Thinking"):
+        self.label = label
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _spin(self):
+        i = 0
+        while not self._stop.is_set():
+            frame = self.FRAMES[i % len(self.FRAMES)]
+            print(f"\r  {C.DIM}{frame} {self.label}...{C.RESET}", end="", flush=True)
+            i += 1
+            self._stop.wait(0.1)
+        # Clear the spinner line.
+        print(f"\r{' ' * (len(self.label) + 12)}\r", end="", flush=True)
+
+    def __enter__(self):
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._stop.set()
+        self._thread.join()
 
 # ── MCP Client ─────────────────────────────────────────────────────────────
 
@@ -219,7 +249,7 @@ def call_vertex(project, access_token, messages, tools_decl):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8")
@@ -374,7 +404,8 @@ def main():
             max_rounds = 5
             for round_num in range(max_rounds):
                 try:
-                    vertex_resp = call_vertex(project, access_token, messages, vertex_tools)
+                    with Spinner("Waiting for Vertex AI"):
+                        vertex_resp = call_vertex(project, access_token, messages, vertex_tools)
                 except Exception as e:
                     cprint(C.RED, f"\n  Vertex error: {e}")
                     break
