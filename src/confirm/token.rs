@@ -136,8 +136,9 @@ mod tests {
     fn expired_token() {
         // Generate a token with 1-second TTL.
         let token = ConfirmToken::generate("test_secret", 1);
-        // Wait for it to expire.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Wait for it to expire (2s to avoid boundary condition with
+        // epoch-second granularity).
+        std::thread::sleep(std::time::Duration::from_millis(2100));
         let token_str = token.to_string_token();
         let result = ConfirmToken::verify("test_secret", &token_str);
         assert!(result.is_err());
