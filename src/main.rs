@@ -3,6 +3,7 @@ mod authz;
 mod audit;
 mod sandbox;
 mod reaper;
+#[allow(dead_code)]
 mod limits;
 mod confirm;
 mod transport;

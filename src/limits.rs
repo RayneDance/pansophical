@@ -2,6 +2,10 @@
 //!
 //! Enforces `max_invocations_per_minute`, `max_concurrent_tools`,
 //! and `max_output_bytes` (pipe monitoring).
+//!
+//! TODO: Wire into transport layer (stdio.rs / http.rs) — the limiter is
+//! fully implemented and tested but not yet called from the tool execution
+//! path. Integration point: between AuthzDecision::Granted and execute_tool().
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

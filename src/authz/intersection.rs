@@ -25,6 +25,7 @@ use crate::config::perm::Perm;
 ///
 /// Returns `Some(actual)` if the grant covers the request, `None` otherwise.
 /// The actual grant is always the *requested* bits, capped by the grant.
+#[allow(dead_code)]
 pub fn intersect(requested: Perm, granted: Perm) -> Option<Perm> {
     if granted.contains(requested) {
         Some(requested)

@@ -77,6 +77,7 @@ impl AccessRequest {
 #[derive(Debug, Clone)]
 pub struct GrantResult {
     /// The actual permissions granted (intersection of needs and grants).
+    #[allow(dead_code)]
     pub actual_perm: Perm,
     /// Whether any matching rule has `confirm = true`.
     #[allow(dead_code)]
@@ -105,6 +106,7 @@ pub struct PolicyDiff {
 pub enum AuthzDecision {
     /// All requests granted. Contains the actual grants and confirm flag.
     Granted {
+        #[allow(dead_code)]
         grants: Vec<GrantResult>,
         requires_confirm: bool,
     },

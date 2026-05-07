@@ -548,7 +548,7 @@ mod restricted {
 }
 
 #[cfg(windows)]
-pub use restricted::{spawn_with_restricted_token, build_env_block, create_low_integrity_token};
+pub use restricted::{spawn_with_restricted_token, build_env_block};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // AppContainer sandbox — strongest Windows isolation
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn create_restricted_token() {
-        let token = create_low_integrity_token();
+        let token = restricted::create_low_integrity_token();
         assert!(token.is_ok(), "should create restricted token: {:?}", token.err());
         if let Ok(handle) = token {
             win32::CloseHandle(handle);

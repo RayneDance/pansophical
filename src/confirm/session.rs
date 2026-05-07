@@ -102,6 +102,7 @@ impl ApprovalCache {
     }
 
     /// Clear all approvals for a connection (e.g., on disconnect).
+    #[allow(dead_code)]
     pub fn clear_connection(&self, connection_id: &str) {
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|k, _| k.connection_id != connection_id);
