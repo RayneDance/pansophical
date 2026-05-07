@@ -22,6 +22,10 @@ impl McpTool for ListDirTool {
         "List the contents of a directory."
     }
 
+    fn groups(&self) -> &[&str] {
+        &["builtin"]
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

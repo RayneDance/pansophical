@@ -21,6 +21,14 @@ pub trait McpTool: Send + Sync {
     /// JSON Schema for the tool's input parameters.
     fn input_schema(&self) -> Value;
 
+    /// Tool groups for authorization matching.
+    ///
+    /// A config rule like `name = "builtin"` will match any tool that
+    /// includes `"builtin"` in its groups. Override this for group membership.
+    fn groups(&self) -> &[&str] {
+        &[]
+    }
+
     /// Declare what resources this tool needs for a given call.
     ///
     /// The server evaluates these against the key's policy rules

@@ -390,7 +390,7 @@ async fn handle_tools_call_http(
 
     // Build access requests.
     let mut access_requests = tool.access_requests(&arguments);
-    access_requests.push(AccessRequest::tool(tool_name));
+    access_requests.push(AccessRequest::tool_with_groups(tool_name, tool.groups()));
 
     // Evaluate against key's policy.
     let key_config = match config.resolve_key(&session.token) {

@@ -231,6 +231,40 @@ fn wildcard_tool_grant() {
     }
 }
 
+// ── Tool group matching ──────────────────────────────────────────────────
+
+#[test]
+fn builtin_group_grant_matches_builtin_tool() {
+    let key = key_with_rules(vec![
+        tool_grant("builtin"),
+    ]);
+    // A builtin tool like list_dir declares groups = ["builtin"].
+    let requests = vec![
+        AccessRequest::tool_with_groups("list_dir", &["builtin"]),
+    ];
+
+    match evaluate(&requests, &key, false) {
+        AuthzDecision::Granted { .. } => {} // expected
+        AuthzDecision::Denied { .. } => panic!("'builtin' grant should match tools in 'builtin' group"),
+    }
+}
+
+#[test]
+fn builtin_group_grant_does_not_match_script_tool() {
+    let key = key_with_rules(vec![
+        tool_grant("builtin"),
+    ]);
+    // A script tool with no groups should NOT match a "builtin" grant.
+    let requests = vec![
+        AccessRequest::tool("my_script_tool"),
+    ];
+
+    match evaluate(&requests, &key, false) {
+        AuthzDecision::Denied { .. } => {} // expected
+        AuthzDecision::Granted { .. } => panic!("'builtin' grant should not match non-builtin tools"),
+    }
+}
+
 // ── Unknown key (tested at config level) ─────────────────────────────────
 
 #[test]

@@ -21,6 +21,10 @@ pub struct AccessRequest {
     pub resource: String,
     /// The permissions the tool needs on this resource.
     pub perm: Perm,
+    /// Optional group memberships (e.g., `["builtin"]`).
+    /// A tool grant rule matching any group name will grant access.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 impl AccessRequest {
@@ -30,6 +34,7 @@ impl AccessRequest {
             target_type: PolicyTargetType::Filesystem,
             resource: path.into(),
             perm,
+            groups: Vec::new(),
         }
     }
 
@@ -39,15 +44,31 @@ impl AccessRequest {
             target_type: PolicyTargetType::Program,
             resource: executable.into(),
             perm,
+            groups: Vec::new(),
         }
     }
 
-    /// Convenience: create a tool meta-authorization request.
+    /// Convenience: create a tool meta-authorization request (no groups).
+    #[allow(dead_code)]
     pub fn tool(name: impl Into<String>) -> Self {
         Self {
             target_type: PolicyTargetType::Tool,
             resource: name.into(),
             perm: Perm::empty(),
+            groups: Vec::new(),
+        }
+    }
+
+    /// Create a tool request with group memberships.
+    ///
+    /// A config rule like `name = "builtin"` will match any tool whose
+    /// groups include `"builtin"`.
+    pub fn tool_with_groups(name: impl Into<String>, groups: &[&str]) -> Self {
+        Self {
+            target_type: PolicyTargetType::Tool,
+            resource: name.into(),
+            perm: Perm::empty(),
+            groups: groups.iter().map(|s| s.to_string()).collect(),
         }
     }
 }
@@ -310,7 +331,13 @@ fn evaluate_single(request: &AccessRequest, rules: &[PolicyRule]) -> SingleResul
             if rule.target_type != PolicyTargetType::Tool {
                 continue;
             }
-            if rule_matches_resource(rule, &request.resource) {
+            // Match by tool name OR by group membership.
+            // e.g. `name = "builtin"` matches any tool in the "builtin" group.
+            let matches = rule_matches_resource(rule, &request.resource)
+                || request.groups.iter().any(|g| {
+                    rule.name.as_deref().is_some_and(|n| n == g)
+                });
+            if matches {
                 return SingleResult::Granted {
                     actual_perm: Perm::empty(),
                     confirm: rule.confirm,

@@ -24,6 +24,10 @@ impl McpTool for WriteFileTool {
         "Write content to a file at the specified path. Creates the file if it doesn't exist."
     }
 
+    fn groups(&self) -> &[&str] {
+        &["builtin"]
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

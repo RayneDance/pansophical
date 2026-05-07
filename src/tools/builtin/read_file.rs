@@ -24,6 +24,10 @@ impl McpTool for ReadFileTool {
         "Read the contents of a file at the specified path."
     }
 
+    fn groups(&self) -> &[&str] {
+        &["builtin"]
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
