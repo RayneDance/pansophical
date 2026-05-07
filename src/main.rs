@@ -109,7 +109,7 @@ fn run_check(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Default server mode. Phase 2+ will implement the actual server loop.
+/// Default server mode: load config and run the transport loop.
 fn run_server(path: &PathBuf) -> Result<()> {
     if !path.exists() {
         return Err(PansophicalError::ConfigNotFound {
@@ -117,9 +117,28 @@ fn run_server(path: &PathBuf) -> Result<()> {
         });
     }
 
+    let config = config::schema::Config::load(path)?;
+
     info!("Pansophical v{}", env!("CARGO_PKG_VERSION"));
     info!("Config: {}", path.display());
-    info!("Server not yet implemented — run with --init to generate config, or --check to validate.");
+    info!("Transport: {}", config.server.transport);
+
+    match config.server.transport.as_str() {
+        "stdio" => {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| PansophicalError::Other(format!("failed to create runtime: {e}")))?;
+            rt.block_on(transport::stdio::run(config));
+        }
+        "http" | "both" => {
+            info!("HTTP transport not yet implemented (Phase 10)");
+        }
+        _ => {
+            // Validated at config load time, but just in case.
+            return Err(PansophicalError::ConfigValidation(
+                "unknown transport".into(),
+            ));
+        }
+    }
 
     Ok(())
 }
