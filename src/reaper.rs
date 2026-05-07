@@ -2,6 +2,10 @@
 //!
 //! Spawns a monitoring task per child; kills after `tool_timeout_secs`.
 //! Handles graceful shutdown: SIGTERM/SIGINT → drain → force-kill.
+//!
+//! On Windows with sandbox enabled, spawns children with a Low Integrity
+//! restricted token via `CreateProcessWithTokenW`, preventing writes to
+//! most filesystem locations.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -33,11 +37,9 @@ pub enum ReapResult {
 
 /// Spawn a child process with environment stripping and timeout enforcement.
 ///
-/// - Starts with an empty environment
-/// - Adds only `env_baseline` vars from the host
-/// - Adds any explicitly granted vars
-/// - Pipes stdout/stderr (never inherits the server's stdio)
-/// - Enforces `timeout_secs` with kill-on-expiry
+/// On Windows with `sandbox.enabled = true`, attempts to spawn via
+/// `CreateProcessWithTokenW` with a Low Integrity restricted token.
+/// Falls back to normal spawn if restricted spawn fails.
 pub async fn spawn_and_reap(
     program: &str,
     args: &[String],
@@ -46,61 +48,89 @@ pub async fn spawn_and_reap(
     timeout_secs: u64,
     max_output_bytes: u64,
 ) -> ReapResult {
-    // Build the command with a stripped environment.
-    let mut cmd = Command::new(program);
-    cmd.args(args);
+    // Build the environment variable list.
+    let env_vars = build_env_vars(sandbox_config, granted_env);
 
-    // ── Environment stripping ─────────────────────────────────────────
-    // Start with a completely empty environment.
-    cmd.env_clear();
-
-    // Add only the baseline vars from the host.
-    for var_name in &sandbox_config.env_baseline {
-        if let Ok(val) = std::env::var(var_name) {
-            cmd.env(var_name, val);
+    // Try sandboxed spawn on Windows.
+    #[cfg(windows)]
+    if sandbox_config.enabled {
+        match spawn_restricted_windows(program, args, &env_vars, timeout_secs, max_output_bytes).await {
+            Ok(result) => return result,
+            Err(e) => {
+                warn!(
+                    program = program,
+                    error = %e,
+                    "Restricted spawn failed — falling back to unsandboxed"
+                );
+            }
         }
     }
 
-    // On Windows, SYSTEMROOT is required for DLL loading. Always inject it.
+    // Normal spawn (fallback / Linux / sandbox disabled).
+    spawn_normal(program, args, &env_vars, timeout_secs, max_output_bytes).await
+}
+
+/// Build the environment variable list for a child process.
+fn build_env_vars(
+    sandbox_config: &SandboxConfig,
+    granted_env: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+
+    for var_name in &sandbox_config.env_baseline {
+        if let Ok(val) = std::env::var(var_name) {
+            vars.push((var_name.clone(), val));
+        }
+    }
+
     #[cfg(windows)]
     {
         if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("SYSTEMROOT")) {
             if let Ok(val) = std::env::var("SYSTEMROOT") {
-                cmd.env("SYSTEMROOT", val);
+                vars.push(("SYSTEMROOT".into(), val));
             }
         }
         if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("COMSPEC")) {
             if let Ok(val) = std::env::var("COMSPEC") {
-                cmd.env("COMSPEC", val);
+                vars.push(("COMSPEC".into(), val));
             }
         }
     }
 
-    // Add explicitly granted environment variables.
     for (k, v) in granted_env {
-        cmd.env(k, v);
+        vars.push((k.clone(), v.clone()));
     }
 
-    // ── Stdio isolation ───────────────────────────────────────────────
-    // CRITICAL: child must NEVER inherit the server's stdout (JSON-RPC channel).
+    vars
+}
+
+/// Spawn using normal Tokio Command (unsandboxed fallback).
+async fn spawn_normal(
+    program: &str,
+    args: &[String],
+    env_vars: &[(String, String)],
+    timeout_secs: u64,
+    max_output_bytes: u64,
+) -> ReapResult {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    cmd.env_clear();
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
 
-    // ── Spawn ─────────────────────────────────────────────────────────
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return ReapResult::SpawnFailed(format!(
-                "failed to spawn '{}': {e}",
-                program
-            ));
+            return ReapResult::SpawnFailed(format!("failed to spawn '{}': {e}", program));
         }
     };
 
-    info!(program = program, "Child spawned");
+    info!(program = program, sandboxed = false, "Child spawned");
 
-    // ── Job Object assignment (Windows) ───────────────────────────────
     #[cfg(windows)]
     {
         if let Some(pid) = child.id() {
@@ -110,49 +140,178 @@ pub async fn spawn_and_reap(
         }
     }
 
-    // Take ownership of stdout/stderr handles for reading.
     let mut child_stdout = child.stdout.take();
     let mut child_stderr = child.stderr.take();
 
-    // ── Timeout enforcement ───────────────────────────────────────────
     let duration = Duration::from_secs(timeout_secs);
-
     let wait_result = timeout(duration, child.wait()).await;
 
     match wait_result {
         Ok(Ok(status)) => {
-            // Child completed within timeout.
             let stdout = read_pipe(&mut child_stdout, max_output_bytes).await;
             let stderr = read_pipe(&mut child_stderr, max_output_bytes).await;
-            ReapResult::Completed {
-                exit_code: status.code(),
-                stdout,
-                stderr,
-            }
+            ReapResult::Completed { exit_code: status.code(), stdout, stderr }
         }
         Ok(Err(e)) => {
             error!(program = program, "Child wait error: {e}");
             ReapResult::SpawnFailed(format!("child wait error: {e}"))
         }
         Err(_) => {
-            // Timeout expired — kill the child.
-            warn!(
-                program = program,
-                timeout_secs = timeout_secs,
-                "Child timed out — killing"
-            );
-            if let Err(e) = child.kill().await {
-                error!("Failed to kill child: {e}");
-            }
-            // Wait for the process to actually exit after kill.
+            warn!(program = program, timeout_secs = timeout_secs, "Child timed out — killing");
+            if let Err(e) = child.kill().await { error!("Failed to kill child: {e}"); }
             let _ = child.wait().await;
-
             let stdout = read_pipe(&mut child_stdout, max_output_bytes).await;
             let stderr = read_pipe(&mut child_stderr, max_output_bytes).await;
             ReapResult::TimedOut { stdout, stderr }
         }
     }
 }
+
+// ── Windows Restricted Spawn ──────────────────────────────────────────────────
+
+/// Spawn a child with a Low Integrity restricted token (Windows only).
+#[cfg(windows)]
+async fn spawn_restricted_windows(
+    program: &str,
+    args: &[String],
+    env_vars: &[(String, String)],
+    timeout_secs: u64,
+    max_output_bytes: u64,
+) -> Result<ReapResult, std::io::Error> {
+    use crate::sandbox::windows::{spawn_with_restricted_token, build_env_block};
+
+    // Build command line string (Windows format).
+    let mut cmd_line = shell_escape_win(program);
+    for arg in args {
+        cmd_line.push(' ');
+        cmd_line.push_str(&shell_escape_win(arg));
+    }
+
+    let env_block = build_env_block(env_vars);
+    let (pi, stdout_handle, stderr_handle) = spawn_with_restricted_token(&cmd_line, &env_block)?;
+
+    let pid = pi.dwProcessId;
+    let process_h = pi.hProcess as usize;
+    let thread_h = pi.hThread as usize;
+    let stdout_h = stdout_handle as usize;
+    let stderr_h = stderr_handle as usize;
+
+    // All raw handles are now captured as usize. Drop pi to prevent !Send contamination.
+    drop(pi);
+
+    info!(program = program, pid = pid, sandboxed = true,
+        "Child spawned with Low Integrity token");
+
+    if let Err(e) = assign_to_server_job(pid) {
+        warn!(pid = pid, "Failed to assign sandboxed child to Job Object: {e}");
+    }
+
+    // Close the thread handle — we only need the process handle.
+    crate::sandbox::windows::win32::CloseHandle(thread_h as std::os::windows::io::RawHandle);
+
+    let max_bytes = max_output_bytes;
+
+    // Read stdout/stderr in blocking tasks (raw Win32 handles aren't async).
+    let stdout_task = tokio::task::spawn_blocking(move || {
+        read_raw_handle(stdout_h as std::os::windows::io::RawHandle, max_bytes)
+    });
+    let stderr_task = tokio::task::spawn_blocking(move || {
+        read_raw_handle(stderr_h as std::os::windows::io::RawHandle, max_bytes)
+    });
+
+    // Wait for process with timeout.
+    let duration = Duration::from_secs(timeout_secs);
+    let wait_h = process_h; // Copy for the wait task
+    let kill_h = process_h; // Copy for potential timeout kill
+    let wait_result = timeout(duration,
+        tokio::task::spawn_blocking(move || {
+            wait_for_process(wait_h as std::os::windows::io::RawHandle)
+        })
+    ).await;
+
+    match wait_result {
+        Ok(Ok(Ok(exit_code))) => {
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            Ok(ReapResult::Completed { exit_code, stdout, stderr })
+        }
+        Ok(Ok(Err(e))) => Ok(ReapResult::SpawnFailed(format!("wait error: {e}"))),
+        Ok(Err(e)) => Ok(ReapResult::SpawnFailed(format!("join error: {e}"))),
+        Err(_) => {
+            warn!(program = program, "Sandboxed child timed out — killing");
+            kill_process_handle(kill_h as std::os::windows::io::RawHandle);
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            Ok(ReapResult::TimedOut { stdout, stderr })
+        }
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_process(handle: std::os::windows::io::RawHandle) -> Result<Option<i32>, std::io::Error> {
+    unsafe extern "system" {
+        fn WaitForSingleObject(h: std::os::windows::io::RawHandle, ms: u32) -> u32;
+        fn GetExitCodeProcess(h: std::os::windows::io::RawHandle, code: *mut u32) -> i32;
+    }
+    unsafe {
+        WaitForSingleObject(handle, 0xFFFFFFFF);
+        let mut code: u32 = 0;
+        if GetExitCodeProcess(handle, &mut code) != 0 {
+            crate::sandbox::windows::win32::CloseHandle(handle);
+            Ok(Some(code as i32))
+        } else {
+            let err = std::io::Error::last_os_error();
+            crate::sandbox::windows::win32::CloseHandle(handle);
+            Err(err)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn kill_process_handle(handle: std::os::windows::io::RawHandle) {
+    unsafe extern "system" {
+        fn TerminateProcess(h: std::os::windows::io::RawHandle, code: u32) -> i32;
+    }
+    unsafe { TerminateProcess(handle, 1); }
+}
+
+#[cfg(windows)]
+fn read_raw_handle(handle: std::os::windows::io::RawHandle, max_bytes: u64) -> Vec<u8> {
+    unsafe extern "system" {
+        fn ReadFile(
+            h: std::os::windows::io::RawHandle, buf: *mut u8,
+            to_read: u32, read: *mut u32, overlapped: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+    let mut output = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        if output.len() as u64 >= max_bytes { break; }
+        let mut bytes_read: u32 = 0;
+        let ok = unsafe { ReadFile(handle, buf.as_mut_ptr(), buf.len() as u32, &mut bytes_read, std::ptr::null_mut()) };
+        if ok == 0 || bytes_read == 0 { break; }
+        output.extend_from_slice(&buf[..bytes_read as usize]);
+    }
+    crate::sandbox::windows::win32::CloseHandle(handle);
+    output
+}
+
+#[cfg(windows)]
+fn shell_escape_win(s: &str) -> String {
+    if s.contains(' ') || s.contains('"') {
+        let mut escaped = String::from('"');
+        for c in s.chars() {
+            if c == '"' { escaped.push('\\'); }
+            escaped.push(c);
+        }
+        escaped.push('"');
+        escaped
+    } else {
+        s.to_string()
+    }
+}
+
+// ── Shared Utilities ──────────────────────────────────────────────────────────
 
 /// Read all data from a pipe handle, truncating at max_bytes.
 async fn read_pipe(
@@ -163,7 +322,6 @@ async fn read_pipe(
         Some(p) => p,
         None => return vec![],
     };
-
     let mut buf = Vec::new();
     match pipe.read_to_end(&mut buf).await {
         Ok(_) => truncate_output(buf, max_bytes),
@@ -171,27 +329,21 @@ async fn read_pipe(
     }
 }
 
-/// Truncate output to `max_bytes`, adding a marker if truncated.
 fn truncate_output(data: Vec<u8>, max_bytes: u64) -> Vec<u8> {
-    if data.len() as u64 <= max_bytes {
-        return data;
-    }
+    if data.len() as u64 <= max_bytes { return data; }
     let mut truncated = data[..max_bytes as usize].to_vec();
     truncated.extend_from_slice(b"\n[output truncated by pansophical]");
     truncated
 }
 
-// ── Windows Job Object ────────────────────────────────────────────────────
+// ── Windows Job Object ────────────────────────────────────────────────────────
 
 #[cfg(windows)]
 use std::sync::OnceLock;
 
-/// Global server Job Object. Initialized once, lives for the server lifetime.
-/// All child processes are assigned to this job so they die when the server exits.
 #[cfg(windows)]
 static SERVER_JOB: OnceLock<crate::sandbox::windows::JobObject> = OnceLock::new();
 
-/// Initialize the global server Job Object. Called once at startup.
 #[cfg(windows)]
 pub fn init_server_job() {
     match crate::sandbox::windows::create_server_job() {
@@ -205,17 +357,15 @@ pub fn init_server_job() {
     }
 }
 
-/// Assign a child process PID to the server Job Object.
 #[cfg(windows)]
 fn assign_to_server_job(pid: u32) -> std::io::Result<()> {
     if let Some(job) = SERVER_JOB.get() {
         job.assign_pid(pid)
     } else {
-        Ok(()) // Job not initialized — skip silently.
+        Ok(())
     }
 }
 
-/// No-op on non-Windows.
 #[cfg(not(windows))]
 pub fn init_server_job() {}
 
@@ -227,9 +377,9 @@ mod tests {
 
     fn test_sandbox() -> SandboxConfig {
         SandboxConfig {
-            enabled: true,
+            enabled: false, // Use normal spawn for existing tests
             strategy: "auto".into(),
-            env_baseline: vec!["PATH".into()],
+            env_baseline: vec!["PATH".into(), "SYSTEMROOT".into(), "COMSPEC".into()],
         }
     }
 
@@ -242,15 +392,7 @@ mod tests {
         };
         let program = if cfg!(windows) { "cmd" } else { "echo" };
 
-        let result = spawn_and_reap(
-            program,
-            &args,
-            &test_sandbox(),
-            &[],
-            5,
-            1024,
-        )
-        .await;
+        let result = spawn_and_reap(program, &args, &test_sandbox(), &[], 5, 1024).await;
 
         match result {
             ReapResult::Completed { exit_code, stdout, .. } => {
@@ -264,8 +406,6 @@ mod tests {
 
     #[tokio::test]
     async fn env_stripping() {
-        // Set a test env var, then verify it's NOT visible to the child.
-        // SAFETY: test-only, single-threaded test runner for this test.
         unsafe { std::env::set_var("PANSOPHICAL_TEST_SECRET", "should_be_stripped") };
 
         let args: Vec<String> = if cfg!(windows) {
@@ -275,15 +415,7 @@ mod tests {
         };
         let program = if cfg!(windows) { "cmd" } else { "env" };
 
-        let result = spawn_and_reap(
-            program,
-            &args,
-            &test_sandbox(),
-            &[],
-            5,
-            65536,
-        )
-        .await;
+        let result = spawn_and_reap(program, &args, &test_sandbox(), &[], 5, 65536).await;
 
         match result {
             ReapResult::Completed { stdout, .. } => {
@@ -308,15 +440,7 @@ mod tests {
         };
         let program = if cfg!(windows) { "cmd" } else { "sleep" };
 
-        let result = spawn_and_reap(
-            program,
-            &args,
-            &test_sandbox(),
-            &[],
-            1, // 1 second timeout
-            1024,
-        )
-        .await;
+        let result = spawn_and_reap(program, &args, &test_sandbox(), &[], 1, 1024).await;
 
         match result {
             ReapResult::TimedOut { .. } => {} // expected
@@ -326,20 +450,9 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_nonexistent() {
-        let result = spawn_and_reap(
-            "nonexistent_binary_12345",
-            &[],
-            &test_sandbox(),
-            &[],
-            5,
-            1024,
-        )
-        .await;
-
+        let result = spawn_and_reap("nonexistent_binary_12345", &[], &test_sandbox(), &[], 5, 1024).await;
         match result {
-            ReapResult::SpawnFailed(msg) => {
-                assert!(msg.contains("nonexistent_binary_12345"));
-            }
+            ReapResult::SpawnFailed(msg) => assert!(msg.contains("nonexistent_binary_12345")),
             other => panic!("expected SpawnFailed, got {other:?}"),
         }
     }
@@ -354,24 +467,37 @@ mod tests {
         let program = if cfg!(windows) { "cmd" } else { "env" };
 
         let result = spawn_and_reap(
-            program,
-            &args,
-            &test_sandbox(),
+            program, &args, &test_sandbox(),
             &[("MY_GRANTED_VAR".into(), "granted_value".into())],
-            5,
-            65536,
-        )
-        .await;
+            5, 65536,
+        ).await;
 
         match result {
             ReapResult::Completed { stdout, .. } => {
                 let out = String::from_utf8_lossy(&stdout);
-                assert!(
-                    out.contains("granted_value"),
-                    "granted env var should be visible: {out}"
-                );
+                assert!(out.contains("granted_value"), "granted env var should be visible: {out}");
             }
             other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Test sandboxed spawn with Low Integrity token (Windows only).
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn sandboxed_spawn_echo() {
+        let mut sandbox = test_sandbox();
+        sandbox.enabled = true;
+
+        let args: Vec<String> = vec!["/C".into(), "echo".into(), "sandboxed_hello".into()];
+        let result = spawn_and_reap("cmd", &args, &sandbox, &[], 5, 1024).await;
+
+        match result {
+            ReapResult::Completed { exit_code, stdout, .. } => {
+                assert_eq!(exit_code, Some(0));
+                let out = String::from_utf8_lossy(&stdout);
+                assert!(out.contains("sandboxed_hello"), "sandboxed child stdout: {out}");
+            }
+            other => panic!("expected sandboxed Completed, got {other:?}"),
         }
     }
 }

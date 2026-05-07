@@ -1,11 +1,127 @@
 //! OS-level child process sandboxing.
 //!
 //! Platform-specific implementations:
-//! - Linux: landlock + seccomp
-//! - Windows: AppContainer + Job Objects
+//! - Linux: landlock + seccomp (planned)
+//! - Windows: Restricted Token + Low Integrity Level + Job Objects
+//!
+//! # Architecture
+//!
+//! The sandbox provides defense-in-depth below the policy engine:
+//!
+//! 1. **Policy engine** (authz) — software check before spawn
+//! 2. **OS sandbox** — hardware enforcement during execution
+//!
+//! Even if a tool doesn't declare all its resource needs, or attempts
+//! to access paths beyond what was authorized, the OS sandbox restricts
+//! the child process to only the paths in the `SandboxProfile`.
 
 #[cfg(target_os = "linux")]
 pub mod linux;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
+
+use std::path::PathBuf;
+
+use crate::config::policy_target::{Effect, PolicyTargetType};
+use crate::config::perm::Perm;
+use crate::config::schema::KeyConfig;
+
+/// Filesystem access profile for a sandboxed child process.
+///
+/// Constructed from authz grants + tool resource declarations + config defaults.
+/// Passed to the platform-specific sandbox implementation.
+#[derive(Debug, Clone, Default)]
+pub struct SandboxProfile {
+    /// Paths the child is allowed to read.
+    pub read_paths: Vec<PathBuf>,
+    /// Paths the child is allowed to read + write.
+    pub write_paths: Vec<PathBuf>,
+    /// Paths the child is allowed to execute.
+    pub exec_paths: Vec<PathBuf>,
+    /// Whether the sandbox is enabled.
+    pub enabled: bool,
+}
+
+impl SandboxProfile {
+    /// Create a new empty profile.
+    pub fn new() -> Self {
+        Self {
+            read_paths: Vec::new(),
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    /// Create a disabled profile (no sandbox enforcement).
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Default::default()
+        }
+    }
+
+    /// Build a SandboxProfile from a key's config and the tool's arguments.
+    ///
+    /// Collects all filesystem grant rules from the key's policy and adds them
+    /// as read or write paths based on the granted permission level.
+    pub fn from_key_config(key_config: &KeyConfig) -> Self {
+        let mut profile = Self::new();
+
+        for rule in &key_config.rules {
+            if rule.effect != Effect::Grant {
+                continue;
+            }
+            if rule.target_type != PolicyTargetType::Filesystem {
+                continue;
+            }
+
+            if let Some(ref path) = rule.path {
+                let perm = rule.perm.unwrap_or(Perm::READ);
+
+                if perm.contains(Perm::WRITE) {
+                    profile.write_paths.push(PathBuf::from(path));
+                } else {
+                    profile.read_paths.push(PathBuf::from(path));
+                }
+            }
+        }
+
+        // Always grant read access to common system paths for DLL loading.
+        #[cfg(windows)]
+        {
+            if let Ok(sys) = std::env::var("SYSTEMROOT") {
+                profile.read_paths.push(PathBuf::from(format!("{sys}\\System32")));
+                profile.read_paths.push(PathBuf::from(format!("{sys}\\SysWOW64")));
+            }
+            // The executable itself needs to be readable.
+            if let Ok(path) = std::env::var("COMSPEC") {
+                profile.exec_paths.push(PathBuf::from(path));
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            profile.read_paths.push(PathBuf::from("/usr/lib"));
+            profile.read_paths.push(PathBuf::from("/usr/lib64"));
+            profile.read_paths.push(PathBuf::from("/lib"));
+            profile.read_paths.push(PathBuf::from("/lib64"));
+            profile.exec_paths.push(PathBuf::from("/usr/bin"));
+            profile.exec_paths.push(PathBuf::from("/bin"));
+        }
+
+        profile
+    }
+
+    /// Add the tool's command binary to the exec paths.
+    pub fn add_executable(&mut self, program: &str) {
+        let path = PathBuf::from(program);
+        if path.is_absolute() {
+            self.exec_paths.push(path);
+        } else {
+            // Relative or bare name — add as-is, OS will resolve via PATH.
+            self.exec_paths.push(path);
+        }
+    }
+}
