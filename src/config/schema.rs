@@ -107,6 +107,19 @@ pub struct SandboxConfig {
 
     #[serde(default = "default_env_baseline")]
     pub env_baseline: Vec<String>,
+
+    /// If true, fall back to unsandboxed execution when the sandbox fails
+    /// to initialize (e.g., Landlock unavailable, AppContainer denied).
+    /// Set to false in security-sensitive environments to refuse execution
+    /// rather than run without isolation.
+    #[serde(default = "default_true")]
+    pub allow_fallback: bool,
+
+    /// If true, deny all network access (TCP bind + connect) in sandboxed
+    /// children. Requires Landlock V4 (kernel 6.7+) on Linux; on Windows,
+    /// AppContainer denies network by default.
+    #[serde(default = "default_true")]
+    pub deny_network: bool,
 }
 
 impl Default for SandboxConfig {
@@ -120,6 +133,8 @@ impl Default for SandboxConfig {
                 "LANG".into(),
                 "HOME".into(),
             ],
+            allow_fallback: true,
+            deny_network: true,
         }
     }
 }

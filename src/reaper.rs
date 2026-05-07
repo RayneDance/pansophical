@@ -82,10 +82,20 @@ pub async fn spawn_and_reap(
         match spawn_restricted_windows(program, args, &env_vars, timeout_secs, max_output_bytes).await {
             Ok(result) => return result,
             Err(e) => {
+                if !sandbox_config.allow_fallback {
+                    error!(
+                        program = program,
+                        error = %e,
+                        "All sandbox methods failed and allow_fallback = false — refusing to execute"
+                    );
+                    return ReapResult::SpawnFailed(
+                        format!("sandbox required but unavailable for '{}': {e}", program)
+                    );
+                }
                 warn!(
                     program = program,
                     error = %e,
-                    "Restricted spawn failed — falling back to unsandboxed"
+                    "Restricted spawn failed — falling back to unsandboxed (allow_fallback = true)"
                 );
             }
         }
@@ -95,7 +105,18 @@ pub async fn spawn_and_reap(
     #[cfg(target_os = "linux")]
     if sandbox_config.enabled {
         if let Some(profile) = crate::sandbox::current_profile() {
-            return spawn_landlock_linux(program, args, &env_vars, timeout_secs, max_output_bytes, &profile).await;
+            return spawn_landlock_linux(
+                program, args, &env_vars, timeout_secs, max_output_bytes,
+                &profile, sandbox_config.deny_network,
+            ).await;
+        } else if !sandbox_config.allow_fallback {
+            error!(
+                program = program,
+                "No sandbox profile available and allow_fallback = false — refusing to execute"
+            );
+            return ReapResult::SpawnFailed(
+                format!("sandbox required but no profile available for '{}'", program)
+            );
         }
     }
 
@@ -202,11 +223,12 @@ async fn spawn_normal(
 
 // ── Linux Landlock Spawn ──────────────────────────────────────────────────────
 
-/// Spawn a child with Landlock filesystem restrictions (Linux only).
+/// Spawn a child with Landlock filesystem + network restrictions (Linux only).
 ///
 /// Uses `pre_exec` to apply:
 /// 1. `PR_SET_PDEATHSIG(SIGKILL)` — child dies when parent dies
 /// 2. Landlock ruleset — restricts filesystem access to paths in the profile
+/// 3. Optional TCP deny — blocks all bind + connect when `deny_network` is true
 #[cfg(target_os = "linux")]
 async fn spawn_landlock_linux(
     program: &str,
@@ -215,6 +237,7 @@ async fn spawn_landlock_linux(
     timeout_secs: u64,
     max_output_bytes: u64,
     profile: &crate::sandbox::SandboxProfile,
+    deny_network: bool,
 ) -> ReapResult {
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -230,7 +253,7 @@ async fn spawn_landlock_linux(
     // Safety: pre_exec runs after fork(), before exec(). The landlock crate
     // only uses syscalls. PR_SET_PDEATHSIG is async-signal-safe.
     unsafe {
-        crate::sandbox::linux::configure_sandbox(cmd.as_std_mut(), profile);
+        crate::sandbox::linux::configure_sandbox(cmd.as_std_mut(), profile, deny_network);
     }
 
     let mut child = match cmd.spawn() {
@@ -596,6 +619,8 @@ mod tests {
                 "TEMP".into(),
                 "TMP".into(),
             ],
+            allow_fallback: true,
+            deny_network: true,
         }
     }
 

@@ -22,30 +22,30 @@ use std::path::Path;
 use std::process::Command;
 
 use landlock::{
-    path_beneath_rules, AccessFs, Ruleset, RulesetAttr,
+    path_beneath_rules, AccessFs, AccessNet, Ruleset, RulesetAttr,
     RulesetCreatedAttr, RulesetStatus, ABI,
 };
 
 use super::SandboxProfile;
 
 /// The Landlock ABI version we target.
-/// V5 (kernel 6.7) adds network and ioctl controls. We use V4 as a reasonable
-/// baseline that covers filesystem + refer access on 6.4+ kernels, falling
-/// back gracefully via BestEffort mode.
-const TARGET_ABI: ABI = ABI::V4;
+/// V5 (kernel 6.7+) adds network (bind/connect) and ioctl controls.
+/// BestEffort mode gracefully degrades on older kernels.
+const TARGET_ABI: ABI = ABI::V5;
 
 /// Configure a `Command` with Landlock sandbox and PR_SET_PDEATHSIG.
 ///
 /// Installs a `pre_exec` hook that:
 /// 1. Sets `PR_SET_PDEATHSIG(SIGKILL)` — child dies when parent dies
 /// 2. Applies Landlock filesystem restrictions from the profile
+/// 3. Optionally denies all TCP bind + connect (`deny_network`)
 ///
 /// # Safety
 ///
 /// The `pre_exec` hook runs in the child after `fork()`. We use only
 /// async-signal-safe operations (syscalls, no heap allocation from Rust's
 /// perspective — the landlock crate uses stack-allocated structures).
-pub unsafe fn configure_sandbox(cmd: &mut Command, profile: &SandboxProfile) {
+pub unsafe fn configure_sandbox(cmd: &mut Command, profile: &SandboxProfile, deny_network: bool) {
     // Clone the profile data we need into owned values for the closure.
     let read_paths: Vec<String> = profile.read_paths.iter()
         .map(|p| strip_glob_suffix(p).display().to_string())
@@ -74,13 +74,34 @@ pub unsafe fn configure_sandbox(cmd: &mut Command, profile: &SandboxProfile) {
         let write_access = AccessFs::from_all(TARGET_ABI);
         let exec_access = read_access | AccessFs::Execute;
 
-        let ruleset = match Ruleset::default()
+        // Declare which access types we handle. Declaring an access type
+        // without adding rules for it means ALL such access is denied.
+        let mut rs_builder = match Ruleset::default()
             .handle_access(AccessFs::from_all(TARGET_ABI))
-            .and_then(|r| r.create())
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("pansophical: landlock init failed: {e}");
+                eprintln!("pansophical: landlock fs handle_access failed: {e}");
+                return Ok(());
+            }
+        };
+
+        // 3. Network deny: handle TCP access types without adding any
+        //    allow rules → all TCP bind + connect is denied.
+        if deny_network {
+            match rs_builder.handle_access(AccessNet::BindTcp | AccessNet::ConnectTcp) {
+                Ok(r) => rs_builder = r,
+                Err(e) => {
+                    // Network rules may fail on pre-6.7 kernels — not fatal.
+                    eprintln!("pansophical: landlock net deny not available: {e}");
+                }
+            }
+        }
+
+        let ruleset = match rs_builder.create() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pansophical: landlock create failed: {e}");
                 return Ok(());
             }
         };
