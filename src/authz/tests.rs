@@ -240,7 +240,7 @@ fn builtin_group_grant_matches_builtin_tool() {
     ]);
     // A builtin tool like list_dir declares groups = ["builtin"].
     let requests = vec![
-        AccessRequest::tool_with_groups("list_dir", &["builtin"]),
+        AccessRequest::tool_with_groups("builtin_list_dir", vec!["builtin".into()]),
     ];
 
     match evaluate(&requests, &key, false) {

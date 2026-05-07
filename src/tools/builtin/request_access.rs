@@ -26,7 +26,7 @@ impl RequestAccessTool {
 #[async_trait]
 impl McpTool for RequestAccessTool {
     fn name(&self) -> &str {
-        "request_access"
+        "builtin_request_access"
     }
 
     fn description(&self) -> &str {
@@ -34,8 +34,8 @@ impl McpTool for RequestAccessTool {
          Use this when a previous tool call was denied due to missing permissions."
     }
 
-    fn groups(&self) -> &[&str] {
-        &["builtin"]
+    fn groups(&self) -> Vec<String> {
+        vec!["builtin".into()]
     }
 
     fn input_schema(&self) -> Value {

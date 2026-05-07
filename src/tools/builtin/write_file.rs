@@ -17,15 +17,15 @@ pub struct WriteFileTool;
 #[async_trait]
 impl McpTool for WriteFileTool {
     fn name(&self) -> &str {
-        "write_file"
+        "builtin_write_file"
     }
 
     fn description(&self) -> &str {
         "Write content to a file at the specified path. Creates the file if it doesn't exist."
     }
 
-    fn groups(&self) -> &[&str] {
-        &["builtin"]
+    fn groups(&self) -> Vec<String> {
+        vec!["builtin".into()]
     }
 
     fn input_schema(&self) -> Value {

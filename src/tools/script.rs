@@ -29,6 +29,14 @@ pub struct ScriptToolDefinition {
     pub name: String,
     pub description: String,
 
+    /// Optional group for namespacing and authorization.
+    ///
+    /// If set, the tool is exposed as `{group}_{name}` (e.g., `devops_git_status`).
+    /// If not set, defaults to `ext` → `ext_{name}` (e.g., `ext_hello_world`).
+    /// The group is also used for group-based tool grants (e.g., `name = "devops"`).
+    #[serde(default)]
+    pub group: Option<String>,
+
     /// The command to invoke.
     pub command: String,
 
@@ -103,6 +111,10 @@ fn default_read_perm() -> String {
 #[derive(Debug)]
 pub struct ScriptTool {
     pub def: ScriptToolDefinition,
+    /// The namespaced name: `{group}_{name}` or `ext_{name}`.
+    namespaced_name: String,
+    /// The group name (from def.group or "ext").
+    group_name: String,
 }
 
 impl ScriptTool {
@@ -133,7 +145,11 @@ impl ScriptTool {
             }
         }
 
-        Ok(Self { def })
+        // Compute namespaced name.
+        let group_name = def.group.clone().unwrap_or_else(|| "ext".to_string());
+        let namespaced_name = format!("{}_{}", group_name, def.name);
+
+        Ok(Self { def, namespaced_name, group_name })
     }
 
     /// Validate an argument value for safety.
@@ -172,11 +188,15 @@ impl ScriptTool {
 #[async_trait]
 impl McpTool for ScriptTool {
     fn name(&self) -> &str {
-        &self.def.name
+        &self.namespaced_name
     }
 
     fn description(&self) -> &str {
         &self.def.description
+    }
+
+    fn groups(&self) -> Vec<String> {
+        vec![self.group_name.clone()]
     }
 
     fn input_schema(&self) -> Value {
@@ -371,6 +391,7 @@ mod tests {
         ScriptToolDefinition {
             name: "test_tool".into(),
             description: "A test tool".into(),
+            group: None,
             command: "echo".into(),
             args: vec!["hello".into()],
             allow_shell: false,
@@ -385,6 +406,12 @@ mod tests {
             }],
             resources: vec![],
         }
+    }
+
+    fn make_tool(def: ScriptToolDefinition) -> ScriptTool {
+        let group_name = def.group.clone().unwrap_or_else(|| "ext".to_string());
+        let namespaced_name = format!("{}_{}", group_name, def.name);
+        ScriptTool { def, namespaced_name, group_name }
     }
 
     #[test]
@@ -425,7 +452,7 @@ allow_shell = true
 
     #[test]
     fn flag_injection_rejected() {
-        let tool = ScriptTool { def: make_def() };
+        let tool = make_tool(make_def());
         let result = tool.validate_arg("input", "--config=/etc/shadow");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("flag injection"));
@@ -435,14 +462,14 @@ allow_shell = true
     fn flag_injection_allowed_with_flag() {
         let mut def = make_def();
         def.parameters[0].allow_flags = true;
-        let tool = ScriptTool { def };
+        let tool = make_tool(def);
         let result = tool.validate_arg("input", "--verbose");
         assert!(result.is_ok());
     }
 
     #[test]
     fn metachar_rejected() {
-        let tool = ScriptTool { def: make_def() };
+        let tool = make_tool(make_def());
         let result = tool.validate_arg("input", "hello; rm -rf /");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("metacharacter"));
@@ -452,13 +479,13 @@ allow_shell = true
     fn passthrough_allows_everything() {
         let mut def = make_def();
         def.arg_passthrough = true;
-        let tool = ScriptTool { def };
+        let tool = make_tool(def);
         assert!(tool.validate_arg("input", "--evil; rm -rf /").is_ok());
     }
 
     #[test]
     fn input_schema_generated() {
-        let tool = ScriptTool { def: make_def() };
+        let tool = make_tool(make_def());
         let schema = tool.input_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["input"].is_object());
@@ -469,5 +496,21 @@ allow_shell = true
     fn load_nonexistent_dir() {
         let tools = load_tools_dir(Path::new("/nonexistent_dir_12345"));
         assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn default_namespace_is_ext() {
+        let tool = make_tool(make_def());
+        assert_eq!(tool.name(), "ext_test_tool");
+        assert_eq!(tool.groups(), vec!["ext".to_string()]);
+    }
+
+    #[test]
+    fn custom_group_namespace() {
+        let mut def = make_def();
+        def.group = Some("devops".into());
+        let tool = make_tool(def);
+        assert_eq!(tool.name(), "devops_test_tool");
+        assert_eq!(tool.groups(), vec!["devops".to_string()]);
     }
 }

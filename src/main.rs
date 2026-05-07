@@ -527,12 +527,12 @@ var_pattern = "HOSTNAME"
 # [[keys.production_agent.rules]]
 # effect = "grant"
 # type   = "tool"
-# name   = "read_file"
+# name   = "builtin_read_file"
 #
 # [[keys.production_agent.rules]]
 # effect = "grant"
 # type   = "tool"
-# name   = "list_dir"
+# name   = "builtin_list_dir"
 #
 # # Restrict filesystem to a specific workspace.
 # [[keys.production_agent.rules]]

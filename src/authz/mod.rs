@@ -63,12 +63,12 @@ impl AccessRequest {
     ///
     /// A config rule like `name = "builtin"` will match any tool whose
     /// groups include `"builtin"`.
-    pub fn tool_with_groups(name: impl Into<String>, groups: &[&str]) -> Self {
+    pub fn tool_with_groups(name: impl Into<String>, groups: Vec<String>) -> Self {
         Self {
             target_type: PolicyTargetType::Tool,
             resource: name.into(),
             perm: Perm::empty(),
-            groups: groups.iter().map(|s| s.to_string()).collect(),
+            groups,
         }
     }
 }

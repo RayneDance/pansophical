@@ -15,15 +15,15 @@ pub struct ListDirTool;
 #[async_trait]
 impl McpTool for ListDirTool {
     fn name(&self) -> &str {
-        "list_dir"
+        "builtin_list_dir"
     }
 
     fn description(&self) -> &str {
         "List the contents of a directory."
     }
 
-    fn groups(&self) -> &[&str] {
-        &["builtin"]
+    fn groups(&self) -> Vec<String> {
+        vec!["builtin".into()]
     }
 
     fn input_schema(&self) -> Value {

@@ -17,15 +17,15 @@ pub struct ReadFileTool;
 #[async_trait]
 impl McpTool for ReadFileTool {
     fn name(&self) -> &str {
-        "read_file"
+        "builtin_read_file"
     }
 
     fn description(&self) -> &str {
         "Read the contents of a file at the specified path."
     }
 
-    fn groups(&self) -> &[&str] {
-        &["builtin"]
+    fn groups(&self) -> Vec<String> {
+        vec!["builtin".into()]
     }
 
     fn input_schema(&self) -> Value {

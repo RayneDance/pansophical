@@ -25,8 +25,8 @@ pub trait McpTool: Send + Sync {
     ///
     /// A config rule like `name = "builtin"` will match any tool that
     /// includes `"builtin"` in its groups. Override this for group membership.
-    fn groups(&self) -> &[&str] {
-        &[]
+    fn groups(&self) -> Vec<String> {
+        vec![]
     }
 
     /// Declare what resources this tool needs for a given call.

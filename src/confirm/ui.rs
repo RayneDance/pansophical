@@ -718,10 +718,10 @@ pub fn dashboard_page(
     toolsBody.innerHTML = '<tr><td colspan="3" class="empty">No tools registered</td></tr>';
   }} else {{
     TOOLS.forEach(t => {{
-      const type = ['read_file', 'write_file', 'list_dir'].includes(t.name)
-        ? '<span class="tag tag-builtin">builtin</span>'
-        : '<span class="tag tag-script">script</span>';
-      toolsBody.innerHTML += `<tr><td><span class="tag tag-tool">${{t.name}}</span></td><td>${{type}}</td><td>${{t.description}}</td></tr>`;
+      const prefix = t.name.split('_')[0];
+      const tagClass = prefix === 'builtin' ? 'tag-builtin' : 'tag-script';
+      const tagLabel = prefix === 'builtin' ? 'builtin' : prefix;
+      toolsBody.innerHTML += `<tr><td><span class="tag tag-tool">${{t.name}}</span></td><td><span class="tag ${{tagClass}}">${{tagLabel}}</span></td><td>${{t.description}}</td></tr>`;
     }});
   }}
 
