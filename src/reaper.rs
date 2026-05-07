@@ -379,7 +379,13 @@ mod tests {
         SandboxConfig {
             enabled: false, // Use normal spawn for existing tests
             strategy: "auto".into(),
-            env_baseline: vec!["PATH".into(), "SYSTEMROOT".into(), "COMSPEC".into()],
+            env_baseline: vec![
+                "PATH".into(),
+                "SYSTEMROOT".into(),
+                "COMSPEC".into(),
+                "TEMP".into(),
+                "TMP".into(),
+            ],
         }
     }
 
@@ -498,6 +504,35 @@ mod tests {
                 assert!(out.contains("sandboxed_hello"), "sandboxed child stdout: {out}");
             }
             other => panic!("expected sandboxed Completed, got {other:?}"),
+        }
+    }
+
+    /// Verify that a sandboxed process runs at Low Integrity Level.
+    ///
+    /// Note: On elevated (admin) sessions, Low Integrity alone may not block
+    /// writes to user directories. For full enforcement on elevated sessions,
+    /// AppContainer or explicit DACLs are needed (Phase 2).
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn sandboxed_runs_at_low_integrity() {
+        let mut sandbox = test_sandbox();
+        sandbox.enabled = true;
+
+        // `whoami /groups` shows the integrity level of the process.
+        let args = vec!["/C".into(), "whoami".into(), "/groups".into()];
+        let result = spawn_and_reap("cmd", &args, &sandbox, &[], 5, 65536).await;
+
+        match result {
+            ReapResult::Completed { exit_code, stdout, .. } => {
+                let out = String::from_utf8_lossy(&stdout);
+                // The output should contain "Low Mandatory Level" for the sandboxed process.
+                assert!(
+                    out.contains("Low Mandatory Level"),
+                    "Sandboxed process should run at Low Mandatory Level.\n\
+                     Actual output:\n{out}"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
         }
     }
 }

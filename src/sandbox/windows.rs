@@ -233,6 +233,7 @@ mod restricted {
     const SECURITY_MANDATORY_LOW_RID: u32 = 0x1000;
 
     const LOGON_WITH_PROFILE: u32 = 0x1;
+    const LOGON_NETCREDENTIALS_ONLY: u32 = 0x2;
     const CREATE_UNICODE_ENVIRONMENT: u32 = 0x00000400;
     const CREATE_NEW_CONSOLE: u32 = 0x00000010;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -331,11 +332,13 @@ mod restricted {
         fn FreeSid(sid: *mut c_void) -> *mut c_void;
 
         // Process creation
-        fn CreateProcessWithTokenW(
+        fn CreateProcessAsUserW(
             token: RawHandle,
-            logon_flags: u32,
             app_name: *const u16,
             cmd_line: *mut u16,
+            proc_attrs: *const c_void,
+            thread_attrs: *const c_void,
+            inherit_handles: i32,
             creation_flags: u32,
             environment: *const c_void,
             current_dir: *const u16,
@@ -490,11 +493,13 @@ mod restricted {
 
             let mut pi: ProcessInformation = std::mem::zeroed();
 
-            let result = CreateProcessWithTokenW(
+            let result = CreateProcessAsUserW(
                 token,
-                LOGON_WITH_PROFILE,
                 ptr::null(),
                 cmd_wide.as_mut_ptr(),
+                ptr::null(), // proc attrs
+                ptr::null(), // thread attrs
+                1,           // inherit handles (TRUE - for pipes)
                 CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                 env_block.as_ptr() as *const c_void,
                 ptr::null(), // inherit current directory
