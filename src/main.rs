@@ -92,7 +92,7 @@ fn run_init(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// `--check`: Parse and validate the config file.
+/// `--check`: Parse and validate the config file with full schema validation.
 fn run_check(path: &PathBuf) -> Result<()> {
     if !path.exists() {
         return Err(PansophicalError::ConfigNotFound {
@@ -100,12 +100,12 @@ fn run_check(path: &PathBuf) -> Result<()> {
         });
     }
 
-    let content = std::fs::read_to_string(path)?;
-    // Phase 1 will add full schema validation here.
-    // For now, verify it parses as valid TOML.
-    let _parsed: toml::Value = toml::from_str(&content)?;
-
-    info!("Config OK: {}", path.display());
+    let config = config::schema::Config::load(path)?;
+    info!(
+        "Config OK: {} ({} keys configured)",
+        path.display(),
+        config.keys.len()
+    );
     Ok(())
 }
 
