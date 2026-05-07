@@ -120,6 +120,29 @@ impl ApprovalCache {
         entries.retain(|_, v| v.approved_at.elapsed() < v.ttl);
         before - entries.len()
     }
+
+    /// List all active (non-expired) grants.
+    pub fn list_active(&self) -> Vec<(ApprovalKey, u64)> {
+        let entries = self.entries.lock().unwrap();
+        entries
+            .iter()
+            .filter(|(_, v)| v.approved_at.elapsed() < v.ttl)
+            .map(|(k, v)| {
+                let remaining = v.ttl.saturating_sub(v.approved_at.elapsed()).as_secs();
+                (k.clone(), remaining)
+            })
+            .collect()
+    }
+
+    /// Remove a specific grant by key fields.
+    pub fn remove(&self, tool: &str, resource: &str, perm: &str) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        let before = entries.len();
+        entries.retain(|k, _| {
+            !(k.tool_name == tool && k.resource_pattern == resource && k.perm == perm)
+        });
+        entries.len() < before
+    }
 }
 
 #[cfg(test)]

@@ -95,16 +95,37 @@ class McpClient:
             text=True,
             bufsize=1,
         )
+        # Drain stderr in a background thread to prevent pipe deadlock.
+        # Without this, the server's tracing logs fill the stderr pipe buffer
+        # (~4-64KB), the server blocks on its next stderr write, and we block
+        # forever waiting for a stdout response.
+        self._stderr_lines = []
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, daemon=True
+        )
+        self._stderr_thread.start()
+
         # Give the server a moment to start up.
         import time
         time.sleep(0.5)
         # Check it didn't immediately crash.
         ret = self.proc.poll()
         if ret is not None:
-            stderr = self.proc.stderr.read()
+            stderr = "\n".join(self._stderr_lines)
             raise RuntimeError(
                 f"Server exited immediately (code {ret}).\nStderr:\n{stderr}"
             )
+
+    def _drain_stderr(self):
+        """Continuously read stderr so the pipe buffer never fills."""
+        try:
+            for line in self.proc.stderr:
+                self._stderr_lines.append(line.rstrip())
+                # Keep only last 200 lines to bound memory.
+                if len(self._stderr_lines) > 200:
+                    self._stderr_lines = self._stderr_lines[-100:]
+        except (ValueError, OSError):
+            pass  # Pipe closed.
 
     def _next_id(self):
         self.req_id += 1
@@ -127,8 +148,8 @@ class McpClient:
         # Read the response line.
         resp_line = self.proc.stdout.readline()
         if not resp_line:
-            # Server died — grab stderr for diagnostics.
-            stderr = self.proc.stderr.read()
+            # Server died — show captured stderr.
+            stderr = "\n".join(self._stderr_lines[-50:])
             raise RuntimeError(
                 f"MCP server closed stdout unexpectedly.\nStderr:\n{stderr}"
             )

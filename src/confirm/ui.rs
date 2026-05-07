@@ -615,6 +615,95 @@ pub fn dashboard_page(
     font-size: 0.9rem;
   }}
   .requests-empty .icon {{ font-size: 2.5rem; margin-bottom: 0.75rem; }}
+  .grant-form {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+  }}
+  .grant-form h3 {{
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+  }}
+  .grant-form .form-row {{
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }}
+  .grant-form .form-group {{
+    flex: 1;
+    min-width: 120px;
+  }}
+  .grant-form label {{
+    display: block;
+    font-size: 0.7rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.3rem;
+  }}
+  .grant-form input, .grant-form select {{
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.5rem 0.6rem;
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    box-sizing: border-box;
+  }}
+  .grant-form input:focus, .grant-form select:focus {{
+    outline: none;
+    border-color: var(--blue);
+  }}
+  .grant-form .form-submit {{
+    display: flex;
+    align-items: flex-end;
+  }}
+  .grant-form .form-submit button {{
+    padding: 0.5rem 1.2rem;
+    border: none;
+    border-radius: 6px;
+    background: var(--green);
+    color: #000;
+    font-weight: 600;
+    font-size: 0.8rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: opacity 0.15s;
+  }}
+  .grant-form .form-submit button:hover {{ opacity: 0.85; }}
+  .grant-card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 0.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: border-color 0.15s;
+  }}
+  .grant-card:hover {{ border-color: var(--green); }}
+  .grant-info {{ font-family: var(--mono); font-size: 0.8rem; }}
+  .grant-info .grant-label {{ color: var(--muted); font-size: 0.7rem; }}
+  .grant-timer {{ font-family: var(--mono); font-size: 0.75rem; color: var(--yellow); margin: 0 1rem; }}
+  .revoke-btn {{
+    padding: 0.3rem 0.8rem;
+    border: 1px solid var(--red);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--red);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+  }}
+  .revoke-btn:hover {{ background: rgba(239,68,68,0.15); }}
 </style>
 </head>
 <body>
@@ -635,6 +724,7 @@ pub fn dashboard_page(
   <button onclick="showPage('requests', this)" id="nav-requests">📨 Requests <span class="badge zero" id="req-badge">0</span></button>
   <button onclick="showPage('tools', this)">🔧 Tools</button>
   <button onclick="showPage('keys', this)">🔑 Keys</button>
+  <button onclick="showPage('grants', this)" id="nav-grants">🛡️ Grants <span class="badge zero" id="grant-badge">0</span></button>
   <button onclick="showPage('audit', this)">📋 Audit</button>
 </div>
 
@@ -693,6 +783,49 @@ pub fn dashboard_page(
     </div>
   </div>
 
+  <!-- Grants -->
+  <div class="page" id="page-grants">
+    <div class="grant-form">
+      <h3>➕ Add Ephemeral Grant</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Tool Name</label>
+          <input id="grant-tool" placeholder="builtin_read_file or *" />
+        </div>
+        <div class="form-group">
+          <label>Resource</label>
+          <input id="grant-resource" placeholder="E:/workspace/**" />
+        </div>
+        <div class="form-group" style="max-width:80px">
+          <label>Perm</label>
+          <select id="grant-perm">
+            <option value="r">r</option>
+            <option value="rw">rw</option>
+            <option value="w">w</option>
+            <option value="x">x</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Scope</label>
+          <select id="grant-scope">
+            <option value="minutes:5">5 Minutes</option>
+            <option value="minutes:30">30 Minutes</option>
+            <option value="session">Session (24h)</option>
+          </select>
+        </div>
+        <div class="form-submit">
+          <button onclick="addGrant()">✓ Grant</button>
+        </div>
+      </div>
+    </div>
+    <div id="grants-container">
+      <div class="requests-empty">
+        <div class="icon">🛡️</div>
+        No active ephemeral grants
+      </div>
+    </div>
+  </div>
+
   <!-- Audit -->
   <div class="page" id="page-audit">
     <div class="table-card">
@@ -748,6 +881,7 @@ pub fn dashboard_page(
     btn.classList.add('active');
     if (name === 'audit') loadAudit();
     if (name === 'requests') loadPending();
+    if (name === 'grants') loadGrants();
   }}
 
   // ── Pending Requests ──────────────────────────────────────────────────
@@ -810,13 +944,17 @@ pub fn dashboard_page(
       headers: {{ 'Content-Type': 'application/json' }},
       body: JSON.stringify({{ scope: scope }})
     }})
-    .then(r => r.json())
+    .then(r => {{
+      if (!r.ok && r.headers.get('content-type')?.indexOf('json') === -1) {{
+        throw new Error('Server returned ' + r.status);
+      }}
+      return r.json();
+    }})
     .then(data => {{
       const el = document.getElementById('result-' + token);
       if (data.ok) {{
         el.className = 'req-result ' + (action === 'approve' ? 'approved' : 'denied');
         el.textContent = action === 'approve' ? '✓ Approved' : '✕ Denied';
-        // Remove card after animation.
         setTimeout(() => loadPending(), 1500);
       }} else {{
         el.className = 'req-result denied';
@@ -825,7 +963,7 @@ pub fn dashboard_page(
     }})
     .catch(err => {{
       const el = document.getElementById('result-' + token);
-      if (el) {{ el.textContent = 'Network error'; el.className = 'req-result denied'; }}
+      if (el) {{ el.textContent = err.message || 'Network error'; el.className = 'req-result denied'; }}
     }});
   }}
 
@@ -858,6 +996,81 @@ pub fn dashboard_page(
         document.getElementById('audit-log').innerHTML = '<div class="empty">Failed to load: ' + err.message + '</div>';
       }});
   }}
+
+  // ── Grants Management ──────────────────────────────────────────────────
+
+  function loadGrants() {{
+    fetch('/api/grants')
+      .then(r => r.json())
+      .then(grants => {{
+        const badge = document.getElementById('grant-badge');
+        badge.textContent = grants.length;
+        badge.className = 'badge' + (grants.length === 0 ? ' zero' : '');
+
+        const container = document.getElementById('grants-container');
+        if (!grants || grants.length === 0) {{
+          container.innerHTML = '<div class="requests-empty"><div class="icon">🛡️</div>No active ephemeral grants</div>';
+          return;
+        }}
+
+        container.innerHTML = grants.map(g => {{
+          const mins = Math.floor(g.remaining_secs / 60);
+          const secs = g.remaining_secs % 60;
+          const timer = mins > 0 ? `${{mins}}m ${{secs}}s` : `${{secs}}s`;
+          return `<div class="grant-card">
+            <div class="grant-info">
+              <div><span class="tag tag-tool">${{g.tool_name}}</span></div>
+              <div class="grant-label">${{g.resource || '(tool only)'}} ${{g.perm}}</div>
+              <div class="grant-label">key: ${{g.key_name}} · conn: ${{g.connection_id}}</div>
+            </div>
+            <div class="grant-timer">⏱ ${{timer}}</div>
+            <button class="revoke-btn" onclick="revokeGrant('${{g.tool_name}}','${{g.resource}}','${{g.perm}}')">✕ Revoke</button>
+          </div>`;
+        }}).join('');
+      }})
+      .catch(() => {{}});
+  }}
+
+  function addGrant() {{
+    const tool = document.getElementById('grant-tool').value.trim();
+    const resource = document.getElementById('grant-resource').value.trim();
+    const perm = document.getElementById('grant-perm').value;
+    const scope = document.getElementById('grant-scope').value;
+
+    if (!tool) {{ alert('Tool name is required'); return; }}
+
+    fetch('/api/grants', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ tool_name: tool, resource: resource || '*', perm: perm, scope: scope }})
+    }})
+    .then(r => r.json())
+    .then(data => {{
+      if (data.ok) {{
+        document.getElementById('grant-tool').value = '';
+        document.getElementById('grant-resource').value = '';
+        loadGrants();
+      }} else {{
+        alert(data.error || 'Failed to add grant');
+      }}
+    }})
+    .catch(err => alert('Error: ' + err.message));
+  }}
+
+  function revokeGrant(tool, resource, perm) {{
+    fetch('/api/grants', {{
+      method: 'DELETE',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ tool_name: tool, resource: resource, perm: perm }})
+    }})
+    .then(r => r.json())
+    .then(() => loadGrants())
+    .catch(err => alert('Error: ' + err.message));
+  }}
+
+  // Poll grants every 5 seconds.
+  setInterval(loadGrants, 5000);
+
 </script>
 </body>
 </html>"##,

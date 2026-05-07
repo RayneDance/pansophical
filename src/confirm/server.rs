@@ -197,6 +197,7 @@ pub fn router(state: Arc<ConfirmState>) -> Router {
         .route("/confirm/{token}/approve", post(handle_approve))
         .route("/confirm/{token}/deny", post(handle_deny))
         .route("/api/pending", get(api_pending))
+        .route("/api/grants", get(api_grants_list).post(api_grants_add).delete(api_grants_remove))
         .route("/api/audit", get(api_audit))
         .route("/health", get(health))
         .with_state(state)
@@ -254,18 +255,20 @@ struct DecisionResponse {
 async fn handle_approve(
     State(state): State<Arc<ConfirmState>>,
     Path(token_str): Path<String>,
-    Json(body): Json<DecisionBody>,
+    body: Option<Json<DecisionBody>>,
 ) -> impl IntoResponse {
-    handle_decision(state, token_str, true, body.scope).await
+    let scope = body.and_then(|b| b.0.scope);
+    handle_decision(state, token_str, true, scope).await
 }
 
 /// Handle denial.
 async fn handle_deny(
     State(state): State<Arc<ConfirmState>>,
     Path(token_str): Path<String>,
-    Json(body): Json<DecisionBody>,
+    body: Option<Json<DecisionBody>>,
 ) -> impl IntoResponse {
-    handle_decision(state, token_str, false, body.scope).await
+    let scope = body.and_then(|b| b.0.scope);
+    handle_decision(state, token_str, false, scope).await
 }
 
 async fn handle_decision(
@@ -567,4 +570,135 @@ async fn api_pending(
         .collect();
 
     Json(items).into_response()
+}
+
+/// API: list all active ephemeral grants (PIN-protected).
+async fn api_grants_list(
+    State(state): State<Arc<ConfirmState>>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let query = req.uri().query().unwrap_or("");
+    if !check_pin(&state, req.headers(), query) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "PIN required"}))).into_response();
+    }
+
+    let grants = state.approval_cache.list_active();
+    let items: Vec<serde_json::Value> = grants
+        .iter()
+        .map(|(k, remaining)| {
+            serde_json::json!({
+                "tool_name": k.tool_name,
+                "resource": k.resource_pattern,
+                "perm": k.perm,
+                "key_name": k.key_name,
+                "connection_id": k.connection_id,
+                "remaining_secs": remaining,
+            })
+        })
+        .collect();
+
+    Json(items).into_response()
+}
+
+#[derive(Deserialize)]
+struct GrantAddBody {
+    tool_name: String,
+    resource: String,
+    perm: String,
+    scope: String,
+}
+
+/// API: add a new ephemeral grant (PIN-protected).
+async fn api_grants_add(
+    State(state): State<Arc<ConfirmState>>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let query = req.uri().query().unwrap_or("");
+    if !check_pin(&state, req.headers(), query) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "PIN required"}))).into_response();
+    }
+
+    // Parse the body manually since we already consumed headers for PIN.
+    let bytes = match axum::body::to_bytes(req.into_body(), 4096).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"}))).into_response(),
+    };
+    let body: GrantAddBody = match serde_json::from_slice(&bytes) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid JSON: {e}")}))).into_response(),
+    };
+
+    let scope = match ApprovalScope::parse(&body.scope) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+
+    let key = ApprovalKey {
+        connection_id: "*".into(),
+        key_name: "*".into(),
+        tool_name: body.tool_name.clone(),
+        resource_pattern: body.resource.clone(),
+        perm: body.perm.clone(),
+    };
+    state.approval_cache.approve(key, &scope);
+
+    state.audit.log(
+        &crate::audit::AuditEntry::new("admin", "admin")
+            .with_tool(&body.tool_name)
+            .with_decision("granted")
+            .with_detail(&format!(
+                "manual grant via UI: {} {} scope={:?}",
+                body.resource, body.perm, scope
+            )),
+    );
+
+    info!(
+        tool = body.tool_name,
+        resource = body.resource,
+        perm = body.perm,
+        "Admin granted ephemeral access via UI"
+    );
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+#[derive(Deserialize)]
+struct GrantRemoveBody {
+    tool_name: String,
+    resource: String,
+    perm: String,
+}
+
+/// API: remove an ephemeral grant (PIN-protected).
+async fn api_grants_remove(
+    State(state): State<Arc<ConfirmState>>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let query = req.uri().query().unwrap_or("");
+    if !check_pin(&state, req.headers(), query) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "PIN required"}))).into_response();
+    }
+
+    let bytes = match axum::body::to_bytes(req.into_body(), 4096).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"}))).into_response(),
+    };
+    let body: GrantRemoveBody = match serde_json::from_slice(&bytes) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid JSON: {e}")}))).into_response(),
+    };
+
+    let removed = state.approval_cache.remove(&body.tool_name, &body.resource, &body.perm);
+
+    state.audit.log(
+        &crate::audit::AuditEntry::new("admin", "admin")
+            .with_tool(&body.tool_name)
+            .with_decision("revoked")
+            .with_detail(&format!(
+                "manual revoke via UI: {} {}",
+                body.resource, body.perm
+            )),
+    );
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "removed": removed}))).into_response()
 }
