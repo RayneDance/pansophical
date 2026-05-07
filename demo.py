@@ -181,14 +181,17 @@ def mcp_tools_to_vertex(mcp_tools):
 
 def get_gcloud_auth():
     """Get project and access token from gcloud CLI."""
+    gcloud_bin = "gcloud.cmd" if sys.platform == "win32" else "gcloud"
     try:
-        token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True, stderr=subprocess.DEVNULL).strip()
-        project = subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True, stderr=subprocess.DEVNULL).strip()
+        token = subprocess.check_output([gcloud_bin, "auth", "print-access-token"], text=True, stderr=subprocess.DEVNULL).strip()
+        project = subprocess.check_output([gcloud_bin, "config", "get-value", "project"], text=True, stderr=subprocess.DEVNULL).strip()
         if not project:
             raise RuntimeError("No gcloud project set. Run: gcloud config set project YOUR_PROJECT")
         return project, token
     except subprocess.CalledProcessError:
         raise RuntimeError("Failed to get gcloud auth. Are you logged in? Run: gcloud auth login")
+    except FileNotFoundError:
+        raise RuntimeError(f"Could not find {gcloud_bin} in PATH. Is Google Cloud SDK installed?")
 
 def call_vertex(project, access_token, messages, tools_decl):
     """Call the Vertex AI API with messages and tool declarations."""
