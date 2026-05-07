@@ -46,6 +46,12 @@ pub struct ConfirmState {
     pub approval_cache: Arc<ApprovalCache>,
     pub audit: Arc<AuditLog>,
     pub server_secret: String,
+    /// JSON-serialized tools list for the dashboard.
+    pub tools_json: Mutex<String>,
+    /// JSON-serialized keys config for the dashboard.
+    pub keys_json: Mutex<String>,
+    /// Server start time.
+    pub start_time: std::time::Instant,
 }
 
 impl ConfirmState {
@@ -60,7 +66,16 @@ impl ConfirmState {
             approval_cache,
             audit,
             server_secret,
+            tools_json: Mutex::new("[]".to_string()),
+            keys_json: Mutex::new("{}".to_string()),
+            start_time: std::time::Instant::now(),
         }
+    }
+
+    /// Update the tools/keys JSON for dashboard rendering.
+    pub async fn set_dashboard_data(&self, tools_json: String, keys_json: String) {
+        *self.tools_json.lock().await = tools_json;
+        *self.keys_json.lock().await = keys_json;
     }
 }
 
@@ -169,9 +184,11 @@ pub async fn request_confirmation(
 /// Build the axum router for the confirm server.
 pub fn router(state: Arc<ConfirmState>) -> Router {
     Router::new()
+        .route("/", get(show_dashboard))
         .route("/confirm/{token}", get(show_confirm_page))
         .route("/confirm/{token}/approve", post(handle_approve))
         .route("/confirm/{token}/deny", post(handle_deny))
+        .route("/api/audit", get(api_audit))
         .route("/health", get(health))
         .with_state(state)
 }
@@ -373,4 +390,41 @@ pub async fn start(state: Arc<ConfirmState>, port: u16) {
     if let Err(e) = axum::serve(listener, app).await {
         error!("Confirm server error: {e}");
     }
+}
+
+/// Show the admin dashboard.
+async fn show_dashboard(
+    State(state): State<Arc<ConfirmState>>,
+) -> impl IntoResponse {
+    let pending_count = state.pending.lock().await.len();
+    let tools_json = state.tools_json.lock().await.clone();
+    let keys_json = state.keys_json.lock().await.clone();
+
+    let elapsed = state.start_time.elapsed();
+    let hours = elapsed.as_secs() / 3600;
+    let minutes = (elapsed.as_secs() % 3600) / 60;
+    let uptime = if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    };
+
+    let html = ui::dashboard_page(
+        env!("CARGO_PKG_VERSION"),
+        &tools_json,
+        &keys_json,
+        pending_count,
+        &uptime,
+    );
+
+    (StatusCode::OK, Html(html))
+}
+
+/// API: return the last 200 audit log entries as JSON.
+async fn api_audit(
+    State(state): State<Arc<ConfirmState>>,
+) -> impl IntoResponse {
+    // Read the audit log file and return the last entries.
+    let entries = state.audit.read_recent(200);
+    Json(entries)
 }

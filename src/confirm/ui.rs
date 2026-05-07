@@ -284,3 +284,399 @@ pub fn approval_page(
         ttl_secs = ttl_secs,
     )
 }
+
+/// Generate the admin dashboard SPA page.
+pub fn dashboard_page(
+    version: &str,
+    tools_json: &str,
+    keys_json: &str,
+    pending_count: usize,
+    uptime: &str,
+) -> String {
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pansophical — Admin Dashboard</title>
+<style>
+  :root {{
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface-hover: #263548;
+    --border: #334155;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --blue: #3b82f6;
+    --purple: #a855f7;
+    --cyan: #06b6d4;
+    --font: 'Inter', system-ui, -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', 'Fira Code', monospace;
+  }}
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }}
+  .topbar {{
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0.75rem 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: blur(12px);
+  }}
+  .topbar .brand {{
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }}
+  .topbar .brand .logo {{
+    width: 32px; height: 32px;
+    background: linear-gradient(135deg, var(--blue), var(--purple));
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    font-weight: 700;
+  }}
+  .topbar .brand h1 {{
+    font-size: 1.1rem;
+    font-weight: 600;
+  }}
+  .topbar .brand .version {{
+    font-size: 0.7rem;
+    color: var(--muted);
+    background: rgba(255,255,255,0.08);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+  }}
+  .topbar .status {{
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--green);
+  }}
+  .topbar .status .dot {{
+    width: 8px; height: 8px;
+    background: var(--green);
+    border-radius: 50%;
+    animation: pulse 2s infinite;
+  }}
+  @keyframes pulse {{
+    0%, 100% {{ opacity: 1; }}
+    50% {{ opacity: 0.4; }}
+  }}
+  .nav {{
+    display: flex;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    gap: 0;
+  }}
+  .nav button {{
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--muted);
+    padding: 0.75rem 1.25rem;
+    cursor: pointer;
+    font-family: var(--font);
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.15s;
+  }}
+  .nav button:hover {{ color: var(--text); }}
+  .nav button.active {{
+    color: var(--text);
+    border-bottom-color: var(--blue);
+  }}
+  .content {{
+    max-width: 1200px;
+    margin: 2rem auto;
+    padding: 0 2rem;
+  }}
+  .grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }}
+  .stat-card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    transition: transform 0.15s, border-color 0.15s;
+  }}
+  .stat-card:hover {{
+    transform: translateY(-2px);
+    border-color: var(--blue);
+  }}
+  .stat-card .label {{
+    font-size: 0.75rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.5rem;
+  }}
+  .stat-card .value {{
+    font-size: 1.75rem;
+    font-weight: 700;
+  }}
+  .stat-card .value.green {{ color: var(--green); }}
+  .stat-card .value.yellow {{ color: var(--yellow); }}
+  .stat-card .value.blue {{ color: var(--blue); }}
+  .stat-card .value.purple {{ color: var(--purple); }}
+  .table-card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 2rem;
+  }}
+  .table-card h2 {{
+    font-size: 1rem;
+    font-weight: 600;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+  }}
+  th {{
+    text-align: left;
+    padding: 0.75rem 1.25rem;
+    font-size: 0.7rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border);
+  }}
+  td {{
+    padding: 0.75rem 1.25rem;
+    font-size: 0.85rem;
+    border-bottom: 1px solid rgba(51,65,85,0.5);
+  }}
+  tr:last-child td {{ border-bottom: none; }}
+  tr:hover td {{ background: var(--surface-hover); }}
+  .tag {{
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    font-family: var(--mono);
+  }}
+  .tag-grant {{ background: rgba(34,197,94,0.15); color: var(--green); }}
+  .tag-deny {{ background: rgba(239,68,68,0.15); color: var(--red); }}
+  .tag-tool {{ background: rgba(59,130,246,0.15); color: var(--blue); }}
+  .tag-builtin {{ background: rgba(168,85,247,0.15); color: var(--purple); }}
+  .tag-script {{ background: rgba(6,182,212,0.15); color: var(--cyan); }}
+  .audit-log {{
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    line-height: 1.6;
+    max-height: 500px;
+    overflow-y: auto;
+    color: var(--muted);
+  }}
+  .audit-log .entry {{ margin-bottom: 0.25rem; }}
+  .audit-log .ts {{ color: var(--muted); }}
+  .audit-log .granted {{ color: var(--green); }}
+  .audit-log .denied {{ color: var(--red); }}
+  .audit-log .pending {{ color: var(--yellow); }}
+  .page {{ display: none; }}
+  .page.active {{ display: block; }}
+  .empty {{
+    text-align: center;
+    padding: 3rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }}
+  .refresh-btn {{
+    background: var(--blue);
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-family: var(--font);
+    font-weight: 500;
+    font-size: 0.8rem;
+    transition: opacity 0.15s;
+  }}
+  .refresh-btn:hover {{ opacity: 0.85; }}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand">
+    <div class="logo">P</div>
+    <h1>Pansophical</h1>
+    <span class="version">v{version}</span>
+  </div>
+  <div class="status">
+    <div class="dot"></div>
+    Running · {uptime}
+  </div>
+</div>
+
+<div class="nav">
+  <button class="active" onclick="showPage('dashboard', this)">📊 Dashboard</button>
+  <button onclick="showPage('tools', this)">🔧 Tools</button>
+  <button onclick="showPage('keys', this)">🔑 Keys</button>
+  <button onclick="showPage('audit', this)">📋 Audit</button>
+</div>
+
+<div class="content">
+  <!-- Dashboard -->
+  <div class="page active" id="page-dashboard">
+    <div class="grid">
+      <div class="stat-card">
+        <div class="label">Status</div>
+        <div class="value green">Online</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Pending Confirms</div>
+        <div class="value yellow">{pending_count}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Registered Tools</div>
+        <div class="value blue" id="tool-count">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Active Keys</div>
+        <div class="value purple" id="key-count">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tools -->
+  <div class="page" id="page-tools">
+    <div class="table-card">
+      <h2>🔧 Registered Tools</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Type</th><th>Description</th></tr></thead>
+        <tbody id="tools-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Keys -->
+  <div class="page" id="page-keys">
+    <div class="table-card">
+      <h2>🔑 Configured Keys</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Rules</th></tr></thead>
+        <tbody id="keys-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Audit -->
+  <div class="page" id="page-audit">
+    <div class="table-card">
+      <h2>📋 Audit Log <button class="refresh-btn" style="margin-left: auto" onclick="loadAudit()">Refresh</button></h2>
+      <div class="audit-log" id="audit-log">
+        <div class="empty">Loading audit log...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const TOOLS = {tools_json};
+  const KEYS = {keys_json};
+
+  // Populate tool count
+  document.getElementById('tool-count').textContent = TOOLS.length;
+  document.getElementById('key-count').textContent = Object.keys(KEYS).length;
+
+  // Populate tools table
+  const toolsBody = document.getElementById('tools-body');
+  if (TOOLS.length === 0) {{
+    toolsBody.innerHTML = '<tr><td colspan="3" class="empty">No tools registered</td></tr>';
+  }} else {{
+    TOOLS.forEach(t => {{
+      const type = ['read_file', 'write_file', 'list_dir'].includes(t.name)
+        ? '<span class="tag tag-builtin">builtin</span>'
+        : '<span class="tag tag-script">script</span>';
+      toolsBody.innerHTML += `<tr><td><span class="tag tag-tool">${{t.name}}</span></td><td>${{type}}</td><td>${{t.description}}</td></tr>`;
+    }});
+  }}
+
+  // Populate keys table
+  const keysBody = document.getElementById('keys-body');
+  const keyEntries = Object.entries(KEYS);
+  if (keyEntries.length === 0) {{
+    keysBody.innerHTML = '<tr><td colspan="2" class="empty">No keys configured</td></tr>';
+  }} else {{
+    keyEntries.forEach(([name, config]) => {{
+      const rules = (config.rules || []).map(r => {{
+        const tag = r.effect === 'grant' ? 'tag-grant' : 'tag-deny';
+        const detail = r.type === 'tool' ? r.name : (r.path || '') + ' ' + (r.perm || '');
+        return `<span class="tag ${{tag}}">${{r.effect}}</span> ${{r.type}}: ${{detail}}`;
+      }}).join('<br>');
+      keysBody.innerHTML += `<tr><td><strong>${{name}}</strong></td><td>${{rules || '<em>No rules</em>'}}</td></tr>`;
+    }});
+  }}
+
+  function showPage(name, btn) {{
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
+    document.getElementById('page-' + name).classList.add('active');
+    btn.classList.add('active');
+    if (name === 'audit') loadAudit();
+  }}
+
+  function loadAudit() {{
+    fetch('/api/audit')
+      .then(r => r.json())
+      .then(entries => {{
+        const el = document.getElementById('audit-log');
+        if (!entries || entries.length === 0) {{
+          el.innerHTML = '<div class="empty">No audit entries</div>';
+          return;
+        }}
+        el.innerHTML = entries.map(e => {{
+          const cls = e.decision === 'granted' ? 'granted' : e.decision === 'denied' ? 'denied' : 'pending';
+          return `<div class="entry"><span class="ts">${{e.timestamp}}</span> [<span class="${{cls}}">${{e.decision || e.event || '-'}}</span>] ${{e.tool || ''}} ${{e.detail || ''}}</div>`;
+        }}).join('');
+      }})
+      .catch(err => {{
+        document.getElementById('audit-log').innerHTML = '<div class="empty">Failed to load: ' + err.message + '</div>';
+      }});
+  }}
+</script>
+</body>
+</html>"##,
+        version = version,
+        tools_json = tools_json,
+        keys_json = keys_json,
+        pending_count = pending_count,
+        uptime = uptime,
+    )
+}
+

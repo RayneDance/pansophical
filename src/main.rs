@@ -144,6 +144,33 @@ fn run_server(path: &PathBuf) -> Result<()> {
         config.server.server_secret.clone(),
     ));
 
+    // Pre-populate dashboard data (tools + keys) for the admin UI.
+    {
+        let registry = tools::ToolRegistry::load_from_config(&config);
+        let tools_list = registry.list();
+        let tools_json = serde_json::to_string(&tools_list).unwrap_or_else(|_| "[]".into());
+
+        // Serialize keys config (name → rules only, no tokens).
+        let keys_json = {
+            let mut keys_obj = serde_json::Map::new();
+            for (name, key_config) in &config.keys {
+                keys_obj.insert(
+                    name.clone(),
+                    serde_json::to_value(&key_config.rules).unwrap_or(serde_json::json!([])),
+                );
+            }
+            serde_json::to_string(&keys_obj).unwrap_or_else(|_| "{}".into())
+        };
+
+        // Block on the async method to set dashboard data.
+        let rt_setup = tokio::runtime::Runtime::new()
+            .map_err(|e| PansophicalError::Other(format!("failed to create runtime: {e}")))?;
+        let cs = Arc::clone(&confirm_state);
+        rt_setup.block_on(async move {
+            cs.set_dashboard_data(tools_json, keys_json).await;
+        });
+    }
+
     match config.server.transport.as_str() {
         "stdio" => {
             let rt = tokio::runtime::Runtime::new()

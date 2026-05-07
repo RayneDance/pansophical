@@ -14,6 +14,8 @@ use crate::config::schema::AuditConfig;
 /// The audit log writer. Thread-safe via internal Mutex.
 pub struct AuditLog {
     inner: Mutex<AuditInner>,
+    /// Path to the audit log file (if file backend).
+    path: Option<String>,
 }
 
 enum AuditInner {
@@ -119,37 +121,39 @@ impl AuditLog {
         if !config.enabled {
             return Self {
                 inner: Mutex::new(AuditInner::Disabled),
+                path: None,
             };
         }
 
-        let inner = match config.output.as_str() {
-            "stdout" => AuditInner::Stdout,
+        let (inner, path) = match config.output.as_str() {
+            "stdout" => (AuditInner::Stdout, None),
             "file" => {
                 match OpenOptions::new()
                     .create(true)
                     .append(true) // O_APPEND: integrity — can't truncate
                     .open(&config.path)
                 {
-                    Ok(f) => AuditInner::File(f),
+                    Ok(f) => (AuditInner::File(f), Some(config.path.clone())),
                     Err(e) => {
                         error!("Failed to open audit log '{}': {e}", config.path);
                         error!("Falling back to disabled audit log");
-                        AuditInner::Disabled
+                        (AuditInner::Disabled, None)
                     }
                 }
             }
             "syslog" => {
                 warn!("Syslog output not yet implemented; falling back to disabled");
-                AuditInner::Disabled
+                (AuditInner::Disabled, None)
             }
             other => {
                 error!("Unknown audit output: '{other}'; falling back to disabled");
-                AuditInner::Disabled
+                (AuditInner::Disabled, None)
             }
         };
 
         Self {
             inner: Mutex::new(inner),
+            path,
         }
     }
 
@@ -196,5 +200,29 @@ impl AuditLog {
             .with_decision("n/a")
             .with_detail(detail);
         self.log(&entry);
+    }
+
+    /// Read the last `n` entries from the audit log file.
+    /// Returns parsed JSON values for the dashboard API.
+    pub fn read_recent(&self, n: usize) -> Vec<Value> {
+        let path = match &self.path {
+            Some(p) => p,
+            None => return vec![],
+        };
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        content
+            .lines()
+            .rev()
+            .take(n)
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect::<Vec<Value>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 }
