@@ -1,5 +1,9 @@
 # Pansophical
 
+This is a work in progress. I make no guaruntees about security or safety. This was almost exclusively generated via LLM, and I have reviewed maybe 10% of the code. It compiles, it runs, and it appears to work for the tests I've had time to run. I make no guaruntees that the sandboxing will work as advertised. Use at your own risk.
+
+Releases won't be a thing until I've done some significant review and testing.
+
 **Security-first MCP server with intersection-based authorization and OS-level sandboxing.**
 
 Pansophical is a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that sits between AI agents and the tools they call — enforcing fine-grained authorization, human-in-the-loop confirmation, process sandboxing, and full audit logging on every invocation.
