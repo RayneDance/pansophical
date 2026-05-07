@@ -58,3 +58,7 @@
 {"ts":"2026-05-07T01:29:50.541515300+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=http","event":"startup"}
 {"ts":"2026-05-07T01:30:53.380037+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=http","event":"startup"}
 {"ts":"2026-05-07T01:31:04.408818900+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=http","event":"startup"}
+{"ts":"2026-05-07T01:53:37.887998100+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=stdio","event":"startup"}
+{"ts":"2026-05-07T01:53:37.892499800+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdio transport started, connection_id=93e3b939-187b-4f66-8d5c-3dd786425f01","event":"transport_start"}
+{"ts":"2026-05-07T01:53:37.910682800+00:00","connection_id":"93e3b939-187b-4f66-8d5c-3dd786425f01","key":"unknown","decision":"denied","detail":"authentication required: provide token in params._meta.token","event":"initialize"}
+{"ts":"2026-05-07T01:53:37.911078200+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdin closed, connection_id=93e3b939-187b-4f66-8d5c-3dd786425f01","event":"transport_close"}

@@ -36,7 +36,9 @@ struct Cli {
 
 fn main() {
     // Initialize tracing (structured logging).
+    // IMPORTANT: Write to stderr, NOT stdout — stdout is the JSON-RPC channel.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -238,13 +240,11 @@ fn run_server(path: &PathBuf) -> Result<()> {
             serde_json::to_string(&keys_obj).unwrap_or_else(|_| "{}".into())
         };
 
-        // Block on the async method to set dashboard data.
-        let rt_setup = tokio::runtime::Runtime::new()
+        // Set dashboard data synchronously (no need for a runtime — just lock the mutex).
+        let rt_tmp = tokio::runtime::Runtime::new()
             .map_err(|e| PansophicalError::Other(format!("failed to create runtime: {e}")))?;
         let cs = Arc::clone(&confirm_state);
-        rt_setup.block_on(async move {
-            cs.set_dashboard_data(tools_json, keys_json).await;
-        });
+        rt_tmp.block_on(cs.set_dashboard_data(tools_json, keys_json));
     }
 
     match config.server.transport.as_str() {
