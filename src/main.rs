@@ -82,15 +82,91 @@ fn run_init(path: &PathBuf) -> Result<()> {
     info!("Config written to: {}", path.display());
     info!("Server secret generated (base64). Keep this value safe.");
 
-    // Also create the tools/ directory if it doesn't exist.
+    // Create the tools/ directory and populate with examples.
     let tools_dir = path.parent().unwrap_or(std::path::Path::new(".")).join("tools");
     if !tools_dir.exists() {
         std::fs::create_dir_all(&tools_dir)?;
         info!("Created tools directory: {}", tools_dir.display());
     }
 
+    write_example_tools(&tools_dir)?;
+
+    info!("Initialization complete. Run `pansophical` to start the server.");
     Ok(())
 }
+
+/// Write example script tool definitions into the tools directory.
+fn write_example_tools(tools_dir: &std::path::Path) -> Result<()> {
+    let examples: &[(&str, &str)] = &[
+        ("hello_world.toml", r#"# ══════════════════════════════════════════════════════════════
+# Example: Hello World
+# ══════════════════════════════════════════════════════════════
+# A minimal script tool that echoes a greeting.
+# Demonstrates basic parameter passing and shell usage.
+
+name        = "hello_world"
+description = "Say hello to someone"
+command     = "echo"
+args        = ["Hello,"]
+allow_shell = false
+
+# Parameters are appended to args when the agent calls the tool.
+[[parameters]]
+name        = "name"
+description = "Name to greet"
+required    = true
+"#),
+        ("git_status.toml", r#"# ══════════════════════════════════════════════════════════════
+# Example: Git Status
+# ══════════════════════════════════════════════════════════════
+# Reports the git status of the current directory.
+# No agent-supplied arguments — fully locked down.
+
+name            = "git_status"
+description     = "Show git status in short format"
+command         = "git"
+args            = ["status", "--short"]
+allow_shell     = false
+arg_passthrough = false
+"#),
+        ("disk_usage.toml", r#"# ══════════════════════════════════════════════════════════════
+# Example: Disk Usage
+# ══════════════════════════════════════════════════════════════
+# Reports disk usage for the current directory.
+# Demonstrates a tool with no parameters (fixed command).
+
+name            = "disk_usage"
+description     = "Show disk usage summary for the working directory"
+command         = "du"
+args            = ["-sh", "."]
+allow_shell     = false
+arg_passthrough = false
+"#),
+        ("list_processes.toml", r#"# ══════════════════════════════════════════════════════════════
+# Example: List Processes (Windows)
+# ══════════════════════════════════════════════════════════════
+# Lists running processes. Uses cmd.exe, so allow_shell = true.
+# This is an example of explicitly opting into shell access.
+
+name        = "list_processes"
+description = "List running processes (Windows)"
+command     = "cmd"
+args        = ["/C", "tasklist", "/FO", "TABLE"]
+allow_shell = true
+"#),
+    ];
+
+    for (filename, content) in examples {
+        let file_path = tools_dir.join(filename);
+        if !file_path.exists() {
+            std::fs::write(&file_path, content)?;
+            info!("  Created example: tools/{}", filename);
+        }
+    }
+
+    Ok(())
+}
+
 
 /// `--check`: Parse and validate the config file with full schema validation.
 fn run_check(path: &PathBuf) -> Result<()> {
