@@ -96,13 +96,13 @@ Navigate to [http://127.0.0.1:9765](http://127.0.0.1:9765) to see registered too
 
 ### 6. Try the demo (optional)
 
-A zero-dependency Python harness connects Gemini (Vertex AI) to Pansophical for interactive tool-calling:
+A zero-dependency Python harness connects Vertex AI (Gemini) to Pansophical for interactive tool-calling:
 
 ```bash
-python demo.py
+python demo.py [--config config.toml] [--binary target/debug/pansophical.exe]
 ```
 
-It will ask for a Gemini API key (or reads `GEMINI_API_KEY` env var), spawn the MCP server, and drop you into a chat where Gemini can call your registered tools through the full authz pipeline.
+Requires `gcloud` auth (`gcloud auth print-access-token`) for Vertex AI. Spawns the MCP server as a subprocess, discovers available tools, and drops you into a chat where Gemini can call your registered tools through the full authz pipeline.
 
 ## Configuration
 
