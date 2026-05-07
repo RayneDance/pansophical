@@ -185,8 +185,99 @@ fn run_server(path: &PathBuf) -> Result<()> {
                 transport::stdio::run(config, audit, confirm_state).await;
             });
         }
-        "http" | "both" => {
-            info!("HTTP transport not yet implemented (Phase 10)");
+        "http" => {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| PansophicalError::Other(format!("failed to create runtime: {e}")))?;
+            rt.block_on(async {
+                // Start the confirm server.
+                let confirm_port = config.ui.port;
+                let confirm_state_bg = Arc::clone(&confirm_state);
+                tokio::spawn(async move {
+                    confirm::server::start(confirm_state_bg, confirm_port).await;
+                });
+
+                // Start the approval cache sweeper.
+                let cache_sweep = Arc::clone(&approval_cache);
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                        let swept = cache_sweep.sweep_expired();
+                        if swept > 0 {
+                            tracing::debug!(swept, "Swept expired approvals");
+                        }
+                    }
+                });
+
+                // Start config hot-reload watcher.
+                let watcher_path = path.clone();
+                let watcher_cache = Arc::clone(&approval_cache);
+                let watcher_audit = Arc::clone(&audit);
+                let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
+                let shared_config_watcher = Arc::clone(&shared_config);
+                tokio::spawn(async move {
+                    config::watcher::watch_config(
+                        watcher_path,
+                        shared_config_watcher,
+                        watcher_cache,
+                        watcher_audit,
+                    )
+                    .await;
+                });
+
+                // Run the HTTP transport (blocks).
+                transport::http::run(config, audit, confirm_state).await;
+            });
+        }
+        "both" => {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| PansophicalError::Other(format!("failed to create runtime: {e}")))?;
+            rt.block_on(async {
+                // Start the confirm server.
+                let confirm_port = config.ui.port;
+                let confirm_state_bg = Arc::clone(&confirm_state);
+                tokio::spawn(async move {
+                    confirm::server::start(confirm_state_bg, confirm_port).await;
+                });
+
+                // Start the approval cache sweeper.
+                let cache_sweep = Arc::clone(&approval_cache);
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                        let swept = cache_sweep.sweep_expired();
+                        if swept > 0 {
+                            tracing::debug!(swept, "Swept expired approvals");
+                        }
+                    }
+                });
+
+                // Start config hot-reload watcher.
+                let watcher_path = path.clone();
+                let watcher_cache = Arc::clone(&approval_cache);
+                let watcher_audit = Arc::clone(&audit);
+                let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
+                let shared_config_watcher = Arc::clone(&shared_config);
+                tokio::spawn(async move {
+                    config::watcher::watch_config(
+                        watcher_path,
+                        shared_config_watcher,
+                        watcher_cache,
+                        watcher_audit,
+                    )
+                    .await;
+                });
+
+                // Run HTTP transport in background.
+                let http_config = config.clone();
+                let http_audit = Arc::clone(&audit);
+                let http_confirm = Arc::clone(&confirm_state);
+                tokio::spawn(async move {
+                    transport::http::run(http_config, http_audit, http_confirm).await;
+                });
+
+                // Run stdio transport in foreground.
+                transport::stdio::run(config, audit, confirm_state).await;
+            });
         }
         _ => {
             // Validated at config load time, but just in case.

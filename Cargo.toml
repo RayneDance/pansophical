@@ -33,6 +33,10 @@ notify         = "6"
 
 # HTTP server (confirm server + HTTP transport)
 axum           = "0.7"
+tower-http     = { version = "0.5", features = ["cors"] }
+
+# SSE streaming
+tokio-stream   = "0.1"
 
 # Concurrent data structures
 dashmap        = "6"
