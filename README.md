@@ -76,6 +76,16 @@ perm   = "rw"
 
 Navigate to [http://127.0.0.1:9765](http://127.0.0.1:9765) to see registered tools, configured keys, and the live audit log.
 
+### 6. Try the demo (optional)
+
+A zero-dependency Python harness connects Gemini to Pansophical for interactive tool-calling:
+
+```bash
+python demo.py
+```
+
+It will ask for a Gemini API key (or reads `GEMINI_API_KEY` env var), spawn the MCP server, and drop you into a chat where Gemini can call your registered tools through the full authz pipeline.
+
 ## Configuration
 
 The server is configured entirely via `config.toml`. Key sections:
