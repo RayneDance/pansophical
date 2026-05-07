@@ -63,8 +63,29 @@ fn normalize_for_platform(path: PathBuf) -> PathBuf {
 ///
 /// The glob pattern is compiled each time. For repeated matching,
 /// use a pre-compiled `GlobSet` (see `compile_glob`).
+///
+/// On Windows, both the path and pattern are normalized to forward
+/// slashes before matching, so `E:\foo\bar` matches `E:/foo/**`.
+///
+/// A `/**` suffix also matches the directory itself — e.g.,
+/// `E:/pansof/**` grants access to both `E:/pansof` and its contents.
 pub fn path_matches_glob(path: &str, pattern: &str) -> bool {
-    let glob = match globset::GlobBuilder::new(pattern)
+    // Normalize separators so Windows backslash paths match
+    // forward-slash config patterns.
+    let path = path.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+
+    // If pattern ends with `/**`, also match the directory root itself.
+    // e.g. `E:/pansof/**` should allow access to `E:/pansof`.
+    if let Some(dir) = pattern.strip_suffix("/**") {
+        let norm_dir = dir.trim_end_matches('/');
+        let norm_path = path.trim_end_matches('/');
+        if norm_path.eq_ignore_ascii_case(norm_dir) {
+            return true;
+        }
+    }
+
+    let glob = match globset::GlobBuilder::new(&pattern)
         .case_insensitive(cfg!(target_os = "windows"))
         .literal_separator(true)
         .build()
@@ -72,7 +93,7 @@ pub fn path_matches_glob(path: &str, pattern: &str) -> bool {
         Ok(g) => g,
         Err(_) => return false,
     };
-    glob.compile_matcher().is_match(path)
+    glob.compile_matcher().is_match(&path)
 }
 
 /// Registry hive alias normalization.
@@ -124,6 +145,26 @@ mod tests {
     fn glob_single_star() {
         assert!(path_matches_glob("/workspace/foo.rs", "/workspace/*.rs"));
         assert!(!path_matches_glob("/workspace/sub/foo.rs", "/workspace/*.rs"));
+    }
+
+    #[test]
+    fn glob_doublestar_matches_directory_root() {
+        // A grant on `E:/pansof/**` should also allow access to `E:/pansof` itself
+        // (e.g. for list_dir on the root of the grant).
+        assert!(path_matches_glob("E:/pansof", "E:/pansof/**"));
+        assert!(path_matches_glob("E:/pansof/", "E:/pansof/**"));
+    }
+
+    #[test]
+    fn glob_backslash_matches_forward_slash_pattern() {
+        // Windows canonicalize produces backslashes, config uses forward slashes.
+        assert!(path_matches_glob("e:\\pansof\\src\\main.rs", "E:/pansof/**"));
+        assert!(path_matches_glob("e:\\pansof", "E:/pansof/**"));
+    }
+
+    #[test]
+    fn glob_mixed_slashes_no_false_positive() {
+        assert!(!path_matches_glob("e:\\other\\file.txt", "E:/pansof/**"));
     }
 
     #[test]
