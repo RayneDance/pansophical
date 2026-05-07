@@ -283,7 +283,10 @@ fn default_tools_dir() -> String { "./tools".into() }
 fn default_true() -> bool { true }
 fn default_strategy() -> String { "auto".into() }
 fn default_env_baseline() -> Vec<String> {
-    vec!["PATH".into(), "TERM".into(), "LANG".into(), "HOME".into()]
+    vec![
+        "PATH".into(), "SYSTEMROOT".into(), "COMSPEC".into(),
+        "TERM".into(), "LANG".into(), "HOME".into(),
+    ]
 }
 fn default_audit_output() -> String { "file".into() }
 fn default_audit_path() -> String { "audit.log".into() }

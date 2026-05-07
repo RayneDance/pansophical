@@ -61,6 +61,21 @@ pub async fn spawn_and_reap(
         }
     }
 
+    // On Windows, SYSTEMROOT is required for DLL loading. Always inject it.
+    #[cfg(windows)]
+    {
+        if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("SYSTEMROOT")) {
+            if let Ok(val) = std::env::var("SYSTEMROOT") {
+                cmd.env("SYSTEMROOT", val);
+            }
+        }
+        if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("COMSPEC")) {
+            if let Ok(val) = std::env::var("COMSPEC") {
+                cmd.env("COMSPEC", val);
+            }
+        }
+    }
+
     // Add explicitly granted environment variables.
     for (k, v) in granted_env {
         cmd.env(k, v);

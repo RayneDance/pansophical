@@ -444,7 +444,7 @@ dir = "./tools"   # path to script tool definition directory
 [sandbox]
 enabled      = true     # disable only if platform support is unavailable
 strategy     = "auto"   # "auto" | "landlock" (Linux) | "app_container" (Windows)
-env_baseline = ["PATH", "TERM", "LANG", "HOME"]  # vars always passed to child
+env_baseline = ["PATH", "SYSTEMROOT", "COMSPEC", "TERM", "LANG", "HOME"]  # vars always passed to child
 
 # ── Audit ──────────────────────────────────────────────────────────────────────
 
