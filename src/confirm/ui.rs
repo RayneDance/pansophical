@@ -528,6 +528,93 @@ pub fn dashboard_page(
     transition: opacity 0.15s;
   }}
   .refresh-btn:hover {{ opacity: 0.85; }}
+  .badge {{
+    background: var(--yellow);
+    color: #000;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 0.1rem 0.45rem;
+    border-radius: 10px;
+    margin-left: 0.35rem;
+    vertical-align: middle;
+  }}
+  .badge.zero {{ background: var(--border); color: var(--muted); }}
+  .request-card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+    transition: border-color 0.15s;
+  }}
+  .request-card:hover {{ border-color: var(--yellow); }}
+  .request-card .req-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }}
+  .request-card .req-tool {{
+    font-weight: 600;
+    font-size: 1rem;
+  }}
+  .request-card .req-timer {{
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--yellow);
+  }}
+  .request-card .req-details {{
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--muted);
+    background: rgba(0,0,0,0.25);
+    padding: 0.75rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    line-height: 1.7;
+  }}
+  .request-card .req-actions {{
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }}
+  .request-card .req-actions select {{
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    font-family: var(--font);
+    font-size: 0.8rem;
+  }}
+  .request-card .req-actions button {{
+    padding: 0.4rem 1rem;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }}
+  .request-card .req-actions button:hover {{ opacity: 0.85; }}
+  .request-card .req-actions button:disabled {{ opacity: 0.4; cursor: default; }}
+  .req-approve {{ background: var(--green); color: #000; }}
+  .req-deny {{ background: var(--red); color: #fff; }}
+  .req-result {{
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-left: 0.5rem;
+  }}
+  .req-result.approved {{ color: var(--green); }}
+  .req-result.denied {{ color: var(--red); }}
+  .requests-empty {{
+    text-align: center;
+    padding: 3rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }}
+  .requests-empty .icon {{ font-size: 2.5rem; margin-bottom: 0.75rem; }}
 </style>
 </head>
 <body>
@@ -545,6 +632,7 @@ pub fn dashboard_page(
 
 <div class="nav">
   <button class="active" onclick="showPage('dashboard', this)">📊 Dashboard</button>
+  <button onclick="showPage('requests', this)" id="nav-requests">📨 Requests <span class="badge zero" id="req-badge">0</span></button>
   <button onclick="showPage('tools', this)">🔧 Tools</button>
   <button onclick="showPage('keys', this)">🔑 Keys</button>
   <button onclick="showPage('audit', this)">📋 Audit</button>
@@ -569,6 +657,16 @@ pub fn dashboard_page(
       <div class="stat-card">
         <div class="label">Active Keys</div>
         <div class="value purple" id="key-count">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Requests -->
+  <div class="page" id="page-requests">
+    <div id="requests-container">
+      <div class="requests-empty">
+        <div class="icon">✅</div>
+        No pending requests
       </div>
     </div>
   </div>
@@ -649,7 +747,93 @@ pub fn dashboard_page(
     document.getElementById('page-' + name).classList.add('active');
     btn.classList.add('active');
     if (name === 'audit') loadAudit();
+    if (name === 'requests') loadPending();
   }}
+
+  // ── Pending Requests ──────────────────────────────────────────────────
+  let pendingData = [];
+  const decidedTokens = new Set();
+
+  function loadPending() {{
+    fetch('/api/pending')
+      .then(r => r.json())
+      .then(items => {{
+        pendingData = items || [];
+        const badge = document.getElementById('req-badge');
+        badge.textContent = pendingData.length;
+        badge.className = 'badge' + (pendingData.length === 0 ? ' zero' : '');
+
+        const container = document.getElementById('requests-container');
+        if (pendingData.length === 0) {{
+          container.innerHTML = '<div class="requests-empty"><div class="icon">✅</div>No pending requests</div>';
+          return;
+        }}
+        container.innerHTML = pendingData.map(r => {{
+          const decided = decidedTokens.has(r.token);
+          return `<div class="request-card" id="req-${{r.token}}">
+            <div class="req-header">
+              <div class="req-tool">📨 ${{r.tool_name}}</div>
+              <div class="req-timer" id="timer-${{r.token}}">${{r.remaining_secs}}s</div>
+            </div>
+            <div class="req-details">
+              <strong>Resource:</strong> ${{r.resource}}<br>
+              <strong>Permission:</strong> ${{r.perm}}<br>
+              <strong>Key:</strong> ${{r.key_name}}
+            </div>
+            <div class="req-actions">
+              <select id="scope-${{r.token}}" ${{decided ? 'disabled' : ''}}>
+                <option value="once">Once</option>
+                <option value="minutes:5">5 Minutes</option>
+                <option value="minutes:30">30 Minutes</option>
+                <option value="session">Session</option>
+              </select>
+              <button class="req-approve" onclick="decideReq('${{r.token}}','approve')" ${{decided ? 'disabled' : ''}}>✓ Approve</button>
+              <button class="req-deny" onclick="decideReq('${{r.token}}','deny')" ${{decided ? 'disabled' : ''}}>✕ Deny</button>
+              <span class="req-result" id="result-${{r.token}}"></span>
+            </div>
+          </div>`;
+        }}).join('');
+      }})
+      .catch(() => {{}});
+  }}
+
+  function decideReq(token, action) {{
+    const scope = document.getElementById('scope-' + token)?.value || 'once';
+    decidedTokens.add(token);
+    // Disable buttons immediately.
+    const card = document.getElementById('req-' + token);
+    if (card) {{
+      card.querySelectorAll('button, select').forEach(el => el.disabled = true);
+    }}
+    fetch(`/confirm/${{token}}/${{action}}`, {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ scope: scope }})
+    }})
+    .then(r => r.json())
+    .then(data => {{
+      const el = document.getElementById('result-' + token);
+      if (data.ok) {{
+        el.className = 'req-result ' + (action === 'approve' ? 'approved' : 'denied');
+        el.textContent = action === 'approve' ? '✓ Approved' : '✕ Denied';
+        // Remove card after animation.
+        setTimeout(() => loadPending(), 1500);
+      }} else {{
+        el.className = 'req-result denied';
+        el.textContent = data.error || 'Error';
+      }}
+    }})
+    .catch(err => {{
+      const el = document.getElementById('result-' + token);
+      if (el) {{ el.textContent = 'Network error'; el.className = 'req-result denied'; }}
+    }});
+  }}
+
+  // Poll for pending requests every 2 seconds.
+  setInterval(loadPending, 2000);
+  loadPending();
+
+  // ── Audit Log ─────────────────────────────────────────────────────────
 
   function loadAudit() {{
     fetch('/api/audit')

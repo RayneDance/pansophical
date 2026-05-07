@@ -59,7 +59,7 @@ pub struct SessionQuery {
 /// Run the HTTP transport server. Blocks until shutdown.
 pub async fn run(config: Config, audit: Arc<AuditLog>, confirm_state: Arc<ConfirmState>) {
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
-    let registry = ToolRegistry::load_from_config(&config);
+    let registry = ToolRegistry::load_with_confirm(&config, Arc::clone(&confirm_state));
 
     // Build CORS layer from config.
     let cors = build_cors_layer(&config.server.http.cors_origins);

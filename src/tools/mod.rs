@@ -82,6 +82,21 @@ impl ToolRegistry {
         registry
     }
 
+    /// Create a registry with all tools including `request_access` (requires confirm state).
+    pub fn load_with_confirm(
+        config: &Config,
+        confirm_state: std::sync::Arc<crate::confirm::server::ConfirmState>,
+    ) -> Self {
+        let mut registry = Self::load_from_config(config);
+
+        // Register request_access with the confirm state.
+        registry.register(Box::new(
+            builtin::request_access::RequestAccessTool::new(confirm_state),
+        ));
+
+        registry
+    }
+
     /// Register a new tool.
     pub fn register(&mut self, tool: Box<dyn McpTool>) {
         self.tools.push(tool);

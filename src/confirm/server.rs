@@ -39,6 +39,7 @@ pub(crate) struct PendingConfirm {
     #[allow(dead_code)]
     token_str: String,
     ttl_secs: u64,
+    created_at: std::time::Instant,
 }
 
 /// Shared state for the confirm server.
@@ -137,6 +138,7 @@ pub async fn request_confirmation(
                 connection_id: connection_id.to_string(),
                 token_str: token_str.clone(),
                 ttl_secs,
+                created_at: std::time::Instant::now(),
             },
         );
     }
@@ -194,6 +196,7 @@ pub fn router(state: Arc<ConfirmState>) -> Router {
         .route("/confirm/{token}", get(show_confirm_page))
         .route("/confirm/{token}/approve", post(handle_approve))
         .route("/confirm/{token}/deny", post(handle_deny))
+        .route("/api/pending", get(api_pending))
         .route("/api/audit", get(api_audit))
         .route("/health", get(health))
         .with_state(state)
@@ -533,4 +536,35 @@ async fn api_audit(
 
     let entries = state.audit.read_recent(200);
     Json(entries).into_response()
+}
+
+/// API: return all pending confirmation requests as JSON (PIN-protected).
+async fn api_pending(
+    State(state): State<Arc<ConfirmState>>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let query = req.uri().query().unwrap_or("");
+    if !check_pin(&state, req.headers(), query) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "PIN required"}))).into_response();
+    }
+
+    let pending = state.pending.lock().await;
+    let items: Vec<serde_json::Value> = pending
+        .iter()
+        .map(|(token, req)| {
+            let age_secs = req.created_at.elapsed().as_secs();
+            serde_json::json!({
+                "token": token,
+                "tool_name": req.tool_name,
+                "resource": req.resource,
+                "perm": req.perm,
+                "key_name": req.key_name,
+                "age_secs": age_secs,
+                "ttl_secs": req.ttl_secs,
+                "remaining_secs": req.ttl_secs.saturating_sub(age_secs),
+            })
+        })
+        .collect();
+
+    Json(items).into_response()
 }

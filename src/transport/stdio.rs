@@ -27,7 +27,7 @@ pub async fn run(config: Config, audit: Arc<AuditLog>, confirm_state: Arc<Confir
     let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
     let mut session = Session::new();
-    let registry = ToolRegistry::load_from_config(&config);
+    let registry = ToolRegistry::load_with_confirm(&config, Arc::clone(&confirm_state));
 
     info!(
         connection_id = %session.connection_id,
