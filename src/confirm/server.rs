@@ -52,6 +52,8 @@ pub struct ConfirmState {
     pub keys_json: Mutex<String>,
     /// Server start time.
     pub start_time: std::time::Instant,
+    /// Admin PIN (empty = no PIN required).
+    pub admin_pin: String,
 }
 
 impl ConfirmState {
@@ -69,6 +71,7 @@ impl ConfirmState {
             tools_json: Mutex::new("[]".to_string()),
             keys_json: Mutex::new("{}".to_string()),
             start_time: std::time::Instant::now(),
+            admin_pin: String::new(),
         }
     }
 
@@ -185,6 +188,7 @@ pub async fn request_confirmation(
 pub fn router(state: Arc<ConfirmState>) -> Router {
     Router::new()
         .route("/", get(show_dashboard))
+        .route("/admin/login", post(handle_admin_login))
         .route("/confirm/{token}", get(show_confirm_page))
         .route("/confirm/{token}/approve", post(handle_approve))
         .route("/confirm/{token}/deny", post(handle_deny))
@@ -392,10 +396,80 @@ pub async fn start(state: Arc<ConfirmState>, port: u16) {
     }
 }
 
-/// Show the admin dashboard.
+/// Check if the request has a valid admin PIN (via cookie or query param).
+fn check_pin(state: &ConfirmState, headers: &axum::http::HeaderMap, query: &str) -> bool {
+    if state.admin_pin.is_empty() {
+        return true; // No PIN configured — allow all.
+    }
+
+    // Check query param: ?pin=...
+    if let Some(qpin) = query
+        .split('&')
+        .find_map(|p| p.strip_prefix("pin="))
+    {
+        if qpin == state.admin_pin {
+            return true;
+        }
+    }
+
+    // Check cookie: admin_pin=...
+    if let Some(cookie_header) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(val) = cookie.strip_prefix("admin_pin=") {
+                if val == state.admin_pin {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Render the admin PIN login page.
+fn admin_login_page() -> String {
+    r#"<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><title>Pansophical — Admin Login</title>
+<style>
+  body { background: #0d1117; color: #c9d1d9; font-family: 'Segoe UI', sans-serif;
+         display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+  .login { background: rgba(22,27,34,0.9); border: 1px solid #30363d; border-radius: 12px;
+           padding: 2rem; max-width: 320px; width: 100%; text-align: center;
+           box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+  h2 { margin-top: 0; color: #58a6ff; }
+  input { width: 100%; padding: 10px; margin: 12px 0; border: 1px solid #30363d;
+          border-radius: 6px; background: #0d1117; color: #c9d1d9; font-size: 16px;
+          box-sizing: border-box; text-align: center; letter-spacing: 4px; }
+  input:focus { outline: none; border-color: #58a6ff; }
+  button { width: 100%; padding: 10px; border: none; border-radius: 6px;
+           background: linear-gradient(135deg, #238636, #2ea043); color: white;
+           font-size: 16px; cursor: pointer; font-weight: 600; }
+  button:hover { opacity: 0.9; }
+  .error { color: #f85149; margin-top: 8px; font-size: 14px; display: none; }
+</style>
+</head><body>
+<div class="login">
+  <h2>🔒 Admin PIN</h2>
+  <form method="POST" action="/admin/login">
+    <input type="password" name="pin" placeholder="• • • •" autofocus required>
+    <button type="submit">Unlock</button>
+  </form>
+</div>
+</body></html>"#.to_string()
+}
+
+/// Show the admin dashboard (PIN-protected).
 async fn show_dashboard(
     State(state): State<Arc<ConfirmState>>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
+    let query = req.uri().query().unwrap_or("");
+    if !check_pin(&state, req.headers(), query) {
+        return (StatusCode::OK, Html(admin_login_page())).into_response();
+    }
+
     let pending_count = state.pending.lock().await.len();
     let tools_json = state.tools_json.lock().await.clone();
     let keys_json = state.keys_json.lock().await.clone();
@@ -417,14 +491,44 @@ async fn show_dashboard(
         &uptime,
     );
 
-    (StatusCode::OK, Html(html))
+    (StatusCode::OK, Html(html)).into_response()
 }
 
-/// API: return the last 200 audit log entries as JSON.
+/// Handle admin PIN login form submission.
+async fn handle_admin_login(
+    State(state): State<Arc<ConfirmState>>,
+    axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let pin = form.get("pin").map(|s| s.as_str()).unwrap_or("");
+
+    if !state.admin_pin.is_empty() && pin == state.admin_pin {
+        // Set a session cookie and redirect to dashboard.
+        let cookie = format!("admin_pin={}; Path=/; HttpOnly; SameSite=Strict", pin);
+        (
+            StatusCode::SEE_OTHER,
+            [
+                ("set-cookie", cookie.as_str()),
+                ("location", "/"),
+            ],
+            "",
+        )
+            .into_response()
+    } else {
+        // Wrong PIN — show login page again.
+        (StatusCode::UNAUTHORIZED, Html(admin_login_page())).into_response()
+    }
+}
+
+/// API: return the last 200 audit log entries as JSON (PIN-protected).
 async fn api_audit(
     State(state): State<Arc<ConfirmState>>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
-    // Read the audit log file and return the last entries.
+    let query = req.uri().query().unwrap_or("");
+    if !check_pin(&state, req.headers(), query) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "PIN required"}))).into_response();
+    }
+
     let entries = state.audit.read_recent(200);
-    Json(entries)
+    Json(entries).into_response()
 }

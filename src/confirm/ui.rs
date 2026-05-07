@@ -662,7 +662,12 @@ pub fn dashboard_page(
         }}
         el.innerHTML = entries.map(e => {{
           const cls = e.decision === 'granted' ? 'granted' : e.decision === 'denied' ? 'denied' : 'pending';
-          return `<div class="entry"><span class="ts">${{e.timestamp}}</span> [<span class="${{cls}}">${{e.decision || e.event || '-'}}</span>] ${{e.tool || ''}} ${{e.detail || ''}}</div>`;
+          const time = e.ts ? e.ts.replace('T', ' ').substring(0, 19) : '-';
+          const who = e.key || '-';
+          const tool = e.tool ? `<strong>${{e.tool}}</strong> ` : '';
+          const detail = e.detail || e.event || '';
+          const outcome = e.outcome ? ` → ${{e.outcome}}` : '';
+          return `<div class="entry"><span class="ts">${{time}}</span> <span class="${{cls}}">${{who}}</span> [<span class="${{cls}}">${{e.decision || '-'}}</span>] ${{tool}}${{detail}}${{outcome}}</div>`;
         }}).join('');
       }})
       .catch(err => {{

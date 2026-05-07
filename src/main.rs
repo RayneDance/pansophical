@@ -221,11 +221,13 @@ fn run_server(path: &PathBuf) -> Result<()> {
 
     // Create the approval cache and confirm state.
     let approval_cache = Arc::new(confirm::session::ApprovalCache::new());
-    let confirm_state = Arc::new(confirm::server::ConfirmState::new(
+    let mut cs = confirm::server::ConfirmState::new(
         Arc::clone(&approval_cache),
         Arc::clone(&audit),
         config.server.server_secret.clone(),
-    ));
+    );
+    cs.admin_pin = config.ui.auth.pin.clone();
+    let confirm_state = Arc::new(cs);
 
     // Pre-populate dashboard data (tools + keys) for the admin UI.
     {
