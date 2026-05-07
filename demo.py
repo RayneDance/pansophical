@@ -64,6 +64,16 @@ class McpClient:
             text=True,
             bufsize=1,
         )
+        # Give the server a moment to start up.
+        import time
+        time.sleep(0.5)
+        # Check it didn't immediately crash.
+        ret = self.proc.poll()
+        if ret is not None:
+            stderr = self.proc.stderr.read()
+            raise RuntimeError(
+                f"Server exited immediately (code {ret}).\nStderr:\n{stderr}"
+            )
 
     def _next_id(self):
         self.req_id += 1
@@ -86,7 +96,11 @@ class McpClient:
         # Read the response line.
         resp_line = self.proc.stdout.readline()
         if not resp_line:
-            raise RuntimeError("MCP server closed stdout unexpectedly")
+            # Server died — grab stderr for diagnostics.
+            stderr = self.proc.stderr.read()
+            raise RuntimeError(
+                f"MCP server closed stdout unexpectedly.\nStderr:\n{stderr}"
+            )
         return json.loads(resp_line)
 
     def notify(self, method, params=None):
