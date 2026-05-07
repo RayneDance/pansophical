@@ -23,8 +23,8 @@ import textwrap
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}"
+VERTEX_MODEL = "gemini-2.5-flash"
+VERTEX_URL = "https://us-central1-aiplatform.googleapis.com/v1/projects/{}/locations/us-central1/publishers/google/models/{}:generateContent"
 
 SYSTEM_PROMPT = textwrap.dedent("""\
     You are an AI assistant with access to tools provided by a secure MCP server.
@@ -155,14 +155,14 @@ class McpClient:
         except Exception:
             self.proc.kill()
 
-# ── Gemini API ─────────────────────────────────────────────────────────────
+# ── Vertex AI ──────────────────────────────────────────────────────────────
 
-def mcp_tools_to_gemini(mcp_tools):
-    """Convert MCP tool definitions to Gemini function declarations."""
+def mcp_tools_to_vertex(mcp_tools):
+    """Convert MCP tool definitions to Vertex function declarations."""
     declarations = []
     for tool in mcp_tools:
         schema = tool.get("inputSchema", {})
-        # Gemini expects "parameters" with type "object".
+        # Vertex expects "parameters" with type "object".
         params = {
             "type": "object",
             "properties": schema.get("properties", {}),
@@ -179,9 +179,20 @@ def mcp_tools_to_gemini(mcp_tools):
     return declarations
 
 
-def call_gemini(api_key, messages, tools_decl):
-    """Call the Gemini API with messages and tool declarations."""
-    url = GEMINI_URL.format(GEMINI_MODEL, api_key)
+def get_gcloud_auth():
+    """Get project and access token from gcloud CLI."""
+    try:
+        token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True, stderr=subprocess.DEVNULL).strip()
+        project = subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True, stderr=subprocess.DEVNULL).strip()
+        if not project:
+            raise RuntimeError("No gcloud project set. Run: gcloud config set project YOUR_PROJECT")
+        return project, token
+    except subprocess.CalledProcessError:
+        raise RuntimeError("Failed to get gcloud auth. Are you logged in? Run: gcloud auth login")
+
+def call_vertex(project, access_token, messages, tools_decl):
+    """Call the Vertex AI API with messages and tool declarations."""
+    url = VERTEX_URL.format(project, VERTEX_MODEL)
 
     body = {
         "contents": messages,
@@ -197,7 +208,10 @@ def call_gemini(api_key, messages, tools_decl):
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}"
+        },
         method="POST",
     )
 
@@ -206,12 +220,12 @@ def call_gemini(api_key, messages, tools_decl):
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8")
-        raise RuntimeError(f"Gemini API error ({e.code}): {error_body}")
+        raise RuntimeError(f"Vertex API error ({e.code}): {error_body}")
 
 
-def extract_response(gemini_resp):
-    """Extract text and/or function calls from a Gemini response."""
-    candidates = gemini_resp.get("candidates", [])
+def extract_response(vertex_resp):
+    """Extract text and/or function calls from a Vertex response."""
+    candidates = vertex_resp.get("candidates", [])
     if not candidates:
         return None, []
 
@@ -230,7 +244,7 @@ def extract_response(gemini_resp):
 # ── Main Loop ──────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Pansophical Demo — Gemini + MCP")
+    parser = argparse.ArgumentParser(description="Pansophical Demo — Vertex AI + MCP")
     parser.add_argument("--config", default="config.toml", help="Path to config.toml")
     parser.add_argument("--binary", default=None, help="Path to pansophical binary")
     args = parser.parse_args()
@@ -256,18 +270,19 @@ def main():
     print()
     cprint(C.BOLD + C.CYAN, "  ╔══════════════════════════════════════════╗")
     cprint(C.BOLD + C.CYAN, "  ║       Pansophical Demo Harness          ║")
-    cprint(C.BOLD + C.CYAN, "  ║   Gemini + MCP Tool-Calling Pipeline    ║")
+    cprint(C.BOLD + C.CYAN, "  ║   Vertex AI + MCP Tool-Calling Pipeline  ║")
     cprint(C.BOLD + C.CYAN, "  ╚══════════════════════════════════════════╝")
     print()
 
-    # Get API key.
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        cprint(C.YELLOW, "  Enter your Gemini API key (or set GEMINI_API_KEY env var):")
-        api_key = input(f"  {C.DIM}>{C.RESET} ").strip()
-        if not api_key:
-            cprint(C.RED, "  No API key provided. Exiting.")
-            sys.exit(1)
+    # Get Vertex Auth.
+    cprint(C.DIM, "  Authenticating with gcloud...")
+    try:
+        project, access_token = get_gcloud_auth()
+    except Exception as e:
+        cprint(C.RED, f"  {e}")
+        sys.exit(1)
+    
+    cprint(C.GREEN, f"  ✓ Authenticated as project: {project}")
     print()
 
     # Start MCP server.
@@ -323,13 +338,13 @@ def main():
         mcp.close()
         sys.exit(1)
 
-    gemini_tools = mcp_tools_to_gemini(tools)
+    vertex_tools = mcp_tools_to_vertex(tools)
     print()
     cprint(C.DIM, "  Type your message, or 'quit' to exit.")
     cprint(C.DIM, "  ─────────────────────────────────────")
     print()
 
-    # Conversation history (Gemini format).
+    # Conversation history (Vertex format).
     messages = []
 
     try:
@@ -352,16 +367,16 @@ def main():
                 "parts": [{"text": user_input}],
             })
 
-            # Call Gemini (potentially multiple rounds for tool calls).
+            # Call Vertex AI (potentially multiple rounds for tool calls).
             max_rounds = 5
             for round_num in range(max_rounds):
                 try:
-                    gemini_resp = call_gemini(api_key, messages, gemini_tools)
+                    vertex_resp = call_vertex(project, access_token, messages, vertex_tools)
                 except Exception as e:
-                    cprint(C.RED, f"\n  Gemini error: {e}")
+                    cprint(C.RED, f"\n  Vertex error: {e}")
                     break
 
-                text, func_calls = extract_response(gemini_resp)
+                text, func_calls = extract_response(vertex_resp)
 
                 if not func_calls:
                     # No tool calls — show the text response.
@@ -372,7 +387,7 @@ def main():
                             "parts": [{"text": text}],
                         })
                         print()
-                        cprint(C.BOLD + C.GREEN, "  Gemini ▸ ", end="")
+                        cprint(C.BOLD + C.GREEN, "  Vertex ▸ ", end="")
                         # Word-wrap the response.
                         lines = text.split("\n")
                         for i, line in enumerate(lines):
@@ -434,7 +449,7 @@ def main():
                     "parts": func_response_parts,
                 })
 
-                # Continue the loop — Gemini will process tool results.
+                # Continue the loop — Vertex will process tool results.
 
     finally:
         cprint(C.DIM, "\n  Shutting down MCP server...")
