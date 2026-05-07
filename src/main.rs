@@ -165,6 +165,22 @@ fn run_server(path: &PathBuf) -> Result<()> {
                     }
                 });
 
+                // Start config hot-reload watcher.
+                let watcher_path = path.clone();
+                let watcher_cache = Arc::clone(&approval_cache);
+                let watcher_audit = Arc::clone(&audit);
+                let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
+                let shared_config_watcher = Arc::clone(&shared_config);
+                tokio::spawn(async move {
+                    config::watcher::watch_config(
+                        watcher_path,
+                        shared_config_watcher,
+                        watcher_cache,
+                        watcher_audit,
+                    )
+                    .await;
+                });
+
                 // Run the stdio transport.
                 transport::stdio::run(config, audit, confirm_state).await;
             });

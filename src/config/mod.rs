@@ -3,6 +3,7 @@
 pub mod schema;
 pub mod perm;
 pub mod policy_target;
+pub mod watcher;
 
 use std::path::Path;
 
