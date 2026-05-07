@@ -27,3 +27,21 @@
 {"ts":"2026-05-07T01:05:40.903843+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdin closed, connection_id=d1bbade5-fa64-4e74-b518-45d9b156e0a0","event":"transport_close"}
 {"ts":"2026-05-07T01:05:52.664196800+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=stdio","event":"startup"}
 {"ts":"2026-05-07T01:05:52.665318500+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdio transport started, connection_id=dd63a550-a97b-4b1e-89ba-072c8e8a9bbc","event":"transport_start"}
+{"ts":"2026-05-07T01:10:30.241406900+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=stdio","event":"startup"}
+{"ts":"2026-05-07T01:10:30.242943900+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdio transport started, connection_id=eb861b23-a91a-4e76-b61f-c111899d5340","event":"transport_start"}
+{"ts":"2026-05-07T01:10:30.243247600+00:00","connection_id":"eb861b23-a91a-4e76-b61f-c111899d5340","key":"ci","decision":"granted","detail":"session initialized","event":"initialize"}
+{"ts":"2026-05-07T01:10:30.243711100+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdin closed, connection_id=eb861b23-a91a-4e76-b61f-c111899d5340","event":"transport_close"}
+{"ts":"2026-05-07T01:10:49.540481300+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=stdio","event":"startup"}
+{"ts":"2026-05-07T01:10:49.541773900+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdio transport started, connection_id=960e4e79-69de-4cc1-b283-9d99414b463d","event":"transport_start"}
+{"ts":"2026-05-07T01:10:49.542010400+00:00","connection_id":"960e4e79-69de-4cc1-b283-9d99414b463d","key":"ci","decision":"granted","detail":"session initialized","event":"initialize"}
+{"ts":"2026-05-07T01:10:49.542373200+00:00","connection_id":"960e4e79-69de-4cc1-b283-9d99414b463d","key":"ci","tool":"echo_test","access_requests":[{"perm":"","resource":"echo_test","target_type":"tool"}],"decision":"granted"}
+{"ts":"2026-05-07T01:10:49.558287900+00:00","connection_id":"960e4e79-69de-4cc1-b283-9d99414b463d","key":"ci","tool":"echo_test","decision":"granted","outcome":"success"}
+{"ts":"2026-05-07T01:10:49.558481400+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdin closed, connection_id=960e4e79-69de-4cc1-b283-9d99414b463d","event":"transport_close"}
+{"ts":"2026-05-07T01:11:24.697657700+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=stdio","event":"startup"}
+{"ts":"2026-05-07T01:11:24.699369700+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdio transport started, connection_id=ef2d4c8d-c82f-47c2-926b-7fa8e751b906","event":"transport_start"}
+{"ts":"2026-05-07T01:11:24.699675100+00:00","connection_id":"ef2d4c8d-c82f-47c2-926b-7fa8e751b906","key":"ci","decision":"granted","detail":"session initialized","event":"initialize"}
+{"ts":"2026-05-07T01:11:24.699915800+00:00","connection_id":"ef2d4c8d-c82f-47c2-926b-7fa8e751b906","key":"ci","tool":"echo_test","access_requests":[{"perm":"","resource":"echo_test","target_type":"tool"}],"decision":"granted"}
+{"ts":"2026-05-07T01:11:24.710608500+00:00","connection_id":"ef2d4c8d-c82f-47c2-926b-7fa8e751b906","key":"ci","tool":"echo_test","decision":"granted","outcome":"success"}
+{"ts":"2026-05-07T01:11:24.713314800+00:00","connection_id":"ef2d4c8d-c82f-47c2-926b-7fa8e751b906","key":"ci","tool":"read_file","access_requests":[{"perm":"r","resource":"e:\\pansophical\\cargo.toml","target_type":"filesystem"},{"perm":"","resource":"read_file","target_type":"tool"}],"decision":"granted"}
+{"ts":"2026-05-07T01:11:24.724254600+00:00","connection_id":"ef2d4c8d-c82f-47c2-926b-7fa8e751b906","key":"ci","tool":"read_file","decision":"granted","outcome":"success"}
+{"ts":"2026-05-07T01:11:24.725128100+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdin closed, connection_id=ef2d4c8d-c82f-47c2-926b-7fa8e751b906","event":"transport_close"}

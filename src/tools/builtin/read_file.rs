@@ -92,10 +92,10 @@ impl McpTool for ReadFileTool {
             reaper::ReapResult::Completed { exit_code, stdout, stderr } => {
                 if exit_code == Some(0) {
                     let text = String::from_utf8_lossy(&stdout).to_string();
-                    Ok(json!([{
-                        "type": "text",
-                        "text": text
-                    }]))
+                    Ok(json!({
+                        "content": [{"type": "text", "text": text}],
+                        "isError": false
+                    }))
                 } else {
                     let err = String::from_utf8_lossy(&stderr).to_string();
                     Err(format!("read_file failed (exit {}): {err}", exit_code.unwrap_or(-1)))

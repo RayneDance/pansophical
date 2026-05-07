@@ -85,9 +85,9 @@ impl McpTool for ListDirTool {
             ));
         }
 
-        Ok(json!([{
-            "type": "text",
-            "text": lines.join("\n")
-        }]))
+        Ok(json!({
+            "content": [{"type": "text", "text": lines.join("\n")}],
+            "isError": false
+        }))
     }
 }

@@ -1,0 +1,10 @@
+name = "echo_test"
+description = "Echoes the provided message"
+command = "cmd"
+args = ["/C", "echo"]
+allow_shell = true
+
+[[parameters]]
+name = "message"
+description = "Message to echo"
+required = true

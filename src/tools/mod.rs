@@ -1,6 +1,7 @@
 //! McpTool trait, tool registry, and built-in tool registration.
 
 pub mod builtin;
+pub mod script;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -50,6 +51,21 @@ impl ToolRegistry {
         registry.register(Box::new(builtin::read_file::ReadFileTool));
         registry.register(Box::new(builtin::write_file::WriteFileTool));
         registry.register(Box::new(builtin::list_dir::ListDirTool));
+
+        registry
+    }
+
+    /// Create a registry and load script tools from the tools directory.
+    pub fn load_from_config(config: &Config) -> Self {
+        let mut registry = Self::new();
+
+        // Load script tools from the tools directory.
+        let tools_dir = std::path::Path::new(&config.tools.dir);
+        let script_tools = script::load_tools_dir(tools_dir);
+        for tool in script_tools {
+            tracing::info!("Registered script tool: {}", tool.name());
+            registry.register(Box::new(tool));
+        }
 
         registry
     }

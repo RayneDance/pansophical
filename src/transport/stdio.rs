@@ -27,7 +27,7 @@ pub async fn run(config: Config, audit: Arc<AuditLog>, confirm_state: Arc<Confir
     let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
     let mut session = Session::new();
-    let registry = ToolRegistry::new();
+    let registry = ToolRegistry::load_from_config(&config);
 
     info!(
         connection_id = %session.connection_id,
@@ -402,7 +402,7 @@ async fn execute_tool(
     tool_name: &str,
 ) -> Value {
     match tool.execute(arguments, config).await {
-        Ok(content) => {
+        Ok(result) => {
             audit.log(
                 &AuditEntry::new(&session.connection_id, &session.key_name)
                     .with_tool(tool_name)
@@ -410,14 +410,7 @@ async fn execute_tool(
                     .with_outcome("success"),
             );
 
-            serde_json::to_value(JsonRpcResponse::new(
-                id,
-                serde_json::json!({
-                    "content": content,
-                    "isError": false
-                }),
-            ))
-            .unwrap()
+            serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap()
         }
         Err(err) => {
             audit.log(

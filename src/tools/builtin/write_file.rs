@@ -91,9 +91,9 @@ impl McpTool for WriteFileTool {
         // verified the path is within the granted policy.
         std::fs::write(path, content).map_err(|e| format!("write_file failed: {e}"))?;
 
-        Ok(json!([{
-            "type": "text",
-            "text": format!("Successfully wrote {} bytes to {}", content.len(), path)
-        }]))
+        Ok(json!({
+            "content": [{"type": "text", "text": format!("Successfully wrote {} bytes to {}", content.len(), path)}],
+            "isError": false
+        }))
     }
 }
