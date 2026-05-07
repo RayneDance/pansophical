@@ -62,8 +62,21 @@ pub async fn spawn_and_reap(
         // Prepare write paths from the task-local sandbox profile.
         if let Some(profile) = crate::sandbox::current_profile() {
             crate::sandbox::prepare_write_paths(&profile);
+            
+            // 1. Try AppContainer (Strongest isolation)
+            match spawn_appcontainer_windows(program, args, &env_vars, timeout_secs, max_output_bytes, &profile).await {
+                Ok(result) => return result,
+                Err(e) => {
+                    warn!(
+                        program = program,
+                        error = %e,
+                        "AppContainer spawn failed — falling back to Low Integrity restricted token"
+                    );
+                }
+            }
         }
 
+        // 2. Try Low Integrity Restricted Token (Fallback isolation)
         match spawn_restricted_windows(program, args, &env_vars, timeout_secs, max_output_bytes).await {
             Ok(result) => return result,
             Err(e) => {
@@ -173,6 +186,114 @@ async fn spawn_normal(
             let stdout = read_pipe(&mut child_stdout, max_output_bytes).await;
             let stderr = read_pipe(&mut child_stderr, max_output_bytes).await;
             ReapResult::TimedOut { stdout, stderr }
+        }
+    }
+}
+
+// ── Windows AppContainer Spawn ────────────────────────────────────────────────
+
+/// Spawn a child within an AppContainer sandbox (Windows only).
+#[cfg(windows)]
+async fn spawn_appcontainer_windows(
+    program: &str,
+    args: &[String],
+    env_vars: &[(String, String)],
+    timeout_secs: u64,
+    max_output_bytes: u64,
+    profile: &crate::sandbox::SandboxProfile,
+) -> Result<ReapResult, std::io::Error> {
+    use crate::sandbox::windows::{build_env_block, AppContainer, spawn_in_appcontainer};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    // Create AppContainer profile
+    let mut container = AppContainer::create()?;
+
+    // Grant access to write paths
+    for path in &profile.write_paths {
+        let clean = path.display().to_string().trim_end_matches("/**").to_string();
+        let clean_path = std::path::Path::new(&clean);
+        if clean_path.exists() {
+            if let Err(e) = container.grant_access(clean_path, true) {
+                warn!(path = %clean, error = %e, "Failed to grant AppContainer write access");
+            }
+        }
+    }
+
+    // Grant access to read paths
+    for path in &profile.read_paths {
+        let clean = path.display().to_string().trim_end_matches("/**").to_string();
+        let clean_path = std::path::Path::new(&clean);
+        if clean_path.exists() {
+            if let Err(e) = container.grant_access(clean_path, false) {
+                warn!(path = %clean, error = %e, "Failed to grant AppContainer read access");
+            }
+        }
+    }
+
+    // Build command line string (Windows format).
+    let mut cmd_line = shell_escape_win(program);
+    for arg in args {
+        cmd_line.push(' ');
+        cmd_line.push_str(&shell_escape_win(arg));
+    }
+
+    let env_block = build_env_block(env_vars);
+    
+    let (pi, stdout_handle, stderr_handle) = spawn_in_appcontainer(&container, &cmd_line, &env_block)?;
+
+    let pid = pi.dwProcessId;
+    let process_h = pi.hProcess as usize;
+    let thread_h = pi.hThread as usize;
+    let stdout_h = stdout_handle as usize;
+    let stderr_h = stderr_handle as usize;
+
+    // Close the thread handle — we only need the process handle.
+    crate::sandbox::windows::win32::CloseHandle(thread_h as std::os::windows::io::RawHandle);
+
+    info!(program = program, pid = pid, sandboxed = true, container = %container.sid_string,
+        "Child spawned in AppContainer");
+
+    if let Err(e) = assign_to_server_job(pid) {
+        warn!(pid = pid, "Failed to assign sandboxed child to Job Object: {e}");
+    }
+
+    let max_bytes = max_output_bytes;
+
+    // Read stdout/stderr in blocking tasks (raw Win32 handles aren't async).
+    let stdout_task = tokio::task::spawn_blocking(move || {
+        read_raw_handle(stdout_h as std::os::windows::io::RawHandle, max_bytes)
+    });
+    let stderr_task = tokio::task::spawn_blocking(move || {
+        read_raw_handle(stderr_h as std::os::windows::io::RawHandle, max_bytes)
+    });
+
+    // Wait for process with timeout.
+    let duration = Duration::from_secs(timeout_secs);
+    let wait_h = process_h; // Copy for the wait task
+    let kill_h = process_h; // Copy for potential timeout kill
+    let wait_result = timeout(duration,
+        tokio::task::spawn_blocking(move || {
+            wait_for_process(wait_h as std::os::windows::io::RawHandle)
+        })
+    ).await;
+
+    // AppContainer profile is automatically deleted here when `container` is dropped.
+
+    match wait_result {
+        Ok(Ok(Ok(exit_code))) => {
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            Ok(ReapResult::Completed { exit_code, stdout, stderr })
+        }
+        Ok(Ok(Err(e))) => Ok(ReapResult::SpawnFailed(format!("wait error: {e}"))),
+        Ok(Err(e)) => Ok(ReapResult::SpawnFailed(format!("join error: {e}"))),
+        Err(_) => {
+            warn!(program = program, "Sandboxed child timed out — killing");
+            kill_process_handle(kill_h as std::os::windows::io::RawHandle);
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            Ok(ReapResult::TimedOut { stdout, stderr })
         }
     }
 }
@@ -594,5 +715,52 @@ mod tests {
 
         assert!(blocked, "Low integrity process should NOT write to Medium integrity dir");
         assert!(allowed, "Low integrity process SHOULD write to Low integrity dir");
+    }
+
+    /// Full AppContainer test:
+    /// 1. AppContainer blocks writes to random directories
+    /// 2. AppContainer allows writes to directories specifically granted in the SandboxProfile
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn sandboxed_appcontainer_isolation() {
+        let test_dir = std::env::temp_dir().join(format!("pansophical_ac_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+        
+        let write_dir = test_dir.join("write");
+        std::fs::create_dir_all(&write_dir).unwrap();
+        
+        let no_write_dir = test_dir.join("nowrite");
+        std::fs::create_dir_all(&no_write_dir).unwrap();
+
+        let mut sandbox = test_sandbox();
+        sandbox.enabled = true;
+
+        let mut profile = crate::sandbox::SandboxProfile::default();
+        profile.write_paths.push(write_dir.clone());
+        
+        let env = vec![
+            ("WRITE_DIR".into(), write_dir.display().to_string()),
+            ("NOWRITE_DIR".into(), no_write_dir.display().to_string()),
+        ];
+        
+        crate::sandbox::with_profile(profile, async {
+            // 1. Try to write to write_dir
+            let args_write = vec!["/C".into(), "copy nul %WRITE_DIR%\\test.txt".into()];
+            let _ = spawn_and_reap("cmd", &args_write, &sandbox, &env, 5, 4096).await;
+
+            // 2. Try to write to no_write_dir
+            let args_nowrite = vec!["/C".into(), "copy nul %NOWRITE_DIR%\\test.txt".into()];
+            let _ = spawn_and_reap("cmd", &args_nowrite, &sandbox, &env, 5, 4096).await;
+        }).await;
+        
+        let write_success = write_dir.join("test.txt").exists();
+        let no_write_success = no_write_dir.join("test.txt").exists();
+        
+        // Clean up
+        let _ = std::fs::remove_dir_all(&test_dir);
+        
+        assert!(write_success, "AppContainer should ALLOW writes to explicitly granted write_paths");
+        assert!(!no_write_success, "AppContainer should BLOCK writes to ungranted paths");
     }
 }

@@ -243,10 +243,10 @@ mod restricted {
     // ── FFI Types ─────────────────────────────────────────────────────────
 
     #[repr(C)]
-    struct SecurityAttributes {
-        length: u32,
-        security_descriptor: *mut c_void,
-        inherit_handle: i32,
+    pub struct SecurityAttributes {
+        pub length: u32,
+        pub security_descriptor: *mut c_void,
+        pub inherit_handle: i32,
     }
 
     #[repr(C)]
@@ -269,25 +269,25 @@ mod restricted {
 
     #[repr(C)]
     #[allow(non_snake_case)]
-    struct StartupInfoW {
-        cb: u32,
-        lpReserved: *mut u16,
-        lpDesktop: *mut u16,
-        lpTitle: *mut u16,
-        dwX: u32,
-        dwY: u32,
-        dwXSize: u32,
-        dwYSize: u32,
-        dwXCountChars: u32,
-        dwYCountChars: u32,
-        dwFillAttribute: u32,
-        dwFlags: u32,
-        wShowWindow: u16,
-        cbReserved2: u16,
-        lpReserved2: *mut u8,
-        hStdInput: RawHandle,
-        hStdOutput: RawHandle,
-        hStdError: RawHandle,
+    pub struct StartupInfoW {
+        pub cb: u32,
+        pub lpReserved: *mut u16,
+        pub lpDesktop: *mut u16,
+        pub lpTitle: *mut u16,
+        pub dwX: u32,
+        pub dwY: u32,
+        pub dwXSize: u32,
+        pub dwYSize: u32,
+        pub dwXCountChars: u32,
+        pub dwYCountChars: u32,
+        pub dwFillAttribute: u32,
+        pub dwFlags: u32,
+        pub wShowWindow: u16,
+        pub cbReserved2: u16,
+        pub lpReserved2: *mut u8,
+        pub hStdInput: RawHandle,
+        pub hStdOutput: RawHandle,
+        pub hStdError: RawHandle,
     }
 
     #[repr(C)]
@@ -534,10 +534,410 @@ mod restricted {
         block.push(0); // double-null terminator
         block
     }
+
+    /// Wrapper to free a SID using FreeSid
+    pub fn free_sid(sid: *mut std::ffi::c_void) {
+        unsafe {
+            FreeSid(sid);
+        }
+    }
 }
 
 #[cfg(windows)]
 pub use restricted::{spawn_with_restricted_token, build_env_block, create_low_integrity_token};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AppContainer sandbox — strongest Windows isolation
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// AppContainer denies ALL filesystem access by default. Only paths with an
+// explicit ACE for the container's SID are accessible. This works regardless
+// of elevation level (admin, standard user, etc.).
+
+#[cfg(windows)]
+pub mod appcontainer {
+    use std::ffi::c_void;
+    use std::os::windows::io::RawHandle;
+    use std::path::Path;
+    use std::{io, ptr};
+
+    use super::restricted::{
+        build_env_block, ProcessInformation, SecurityAttributes, StartupInfoW,
+    };
+
+    // ── Constants ────────────────────────────────────────────────────────────
+
+    const CREATE_UNICODE_ENVIRONMENT: u32 = 0x00000400;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x00080000;
+    const STARTF_USESTDHANDLES: u32 = 0x00000100;
+    const HANDLE_FLAG_INHERIT: u32 = 0x00000001;
+
+    // PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = ProcThreadAttributeValue(9, FALSE, TRUE, FALSE)
+    // = 9 | PROC_THREAD_ATTRIBUTE_INPUT(0x20000) = 0x20009
+    const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: usize = 0x00020009;
+
+    // HRESULT values
+    const S_OK: i32 = 0;
+    const E_ALREADY_EXISTS: i32 = -2147023436_i32; // 0x800700B7
+
+    // ── FFI Types ────────────────────────────────────────────────────────────
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct SecurityCapabilities {
+        AppContainerSid: *mut c_void,
+        Capabilities: *mut c_void, // PSID_AND_ATTRIBUTES — we use none
+        CapabilityCount: u32,
+        Reserved: u32,
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct StartupInfoExW {
+        StartupInfo: StartupInfoW,
+        lpAttributeList: *mut c_void, // PPROC_THREAD_ATTRIBUTE_LIST
+    }
+
+    // ── FFI Declarations ─────────────────────────────────────────────────────
+
+    #[link(name = "userenv")]
+    unsafe extern "system" {
+        fn CreateAppContainerProfile(
+            container_name: *const u16,
+            display_name: *const u16,
+            description: *const u16,
+            capabilities: *const c_void,
+            capability_count: u32,
+            sid_ptr: *mut *mut c_void,
+        ) -> i32; // HRESULT
+
+        fn DeleteAppContainerProfile(container_name: *const u16) -> i32;
+    }
+
+    unsafe extern "system" {
+        // SID → string conversion
+        fn ConvertSidToStringSidW(
+            sid: *const c_void,
+            string_sid: *mut *mut u16,
+        ) -> i32;
+        fn LocalFree(mem: *mut c_void) -> *mut c_void;
+
+        // Process creation
+        fn CreateProcessW(
+            app_name: *const u16,
+            cmd_line: *mut u16,
+            proc_attrs: *const c_void,
+            thread_attrs: *const c_void,
+            inherit_handles: i32,
+            creation_flags: u32,
+            environment: *const c_void,
+            current_dir: *const u16,
+            startup_info: *const StartupInfoExW,
+            process_info: *mut ProcessInformation,
+        ) -> i32;
+
+        // Proc thread attribute list management
+        fn InitializeProcThreadAttributeList(
+            list: *mut c_void,
+            count: u32,
+            flags: u32,
+            size: *mut usize,
+        ) -> i32;
+        fn UpdateProcThreadAttribute(
+            list: *mut c_void,
+            flags: u32,
+            attribute: usize,
+            value: *const c_void,
+            size: usize,
+            previous_value: *mut c_void,
+            return_size: *mut usize,
+        ) -> i32;
+        fn DeleteProcThreadAttributeList(list: *mut c_void);
+
+        // Pipe + handle management (re-declared from restricted module)
+        fn CreatePipe(
+            read: *mut RawHandle, write: *mut RawHandle,
+            attrs: *const SecurityAttributes, size: u32,
+        ) -> i32;
+        fn SetHandleInformation(handle: RawHandle, mask: u32, flags: u32) -> i32;
+
+        fn HeapAlloc(heap: RawHandle, flags: u32, bytes: usize) -> *mut c_void;
+        fn HeapFree(heap: RawHandle, flags: u32, mem: *mut c_void) -> i32;
+        fn GetProcessHeap() -> RawHandle;
+
+        safe fn CloseHandle(handle: RawHandle) -> i32;
+    }
+
+    // ── AppContainer lifecycle ───────────────────────────────────────────────
+
+    /// Managed AppContainer profile with RAII cleanup.
+    pub struct AppContainer {
+        name_wide: Vec<u16>,
+        pub sid: *mut c_void,
+        pub sid_string: String,
+        granted_paths: Vec<String>,
+    }
+
+    // SAFETY: AppContainer is only used on the creating thread before spawn.
+    // The SID pointer is a kernel-managed object safe to move between threads.
+    unsafe impl Send for AppContainer {}
+
+    impl AppContainer {
+        /// Create a new AppContainer profile with a unique name.
+        pub fn create() -> io::Result<Self> {
+            let uuid = uuid::Uuid::new_v4();
+            let name = format!("pansophical-{}", uuid);
+            let display = format!("Pansophical Sandbox {}", uuid);
+            let desc = "Pansophical MCP server sandboxed child";
+
+            let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let display_wide: Vec<u16> = display.encode_utf16().chain(std::iter::once(0)).collect();
+            let desc_wide: Vec<u16> = desc.encode_utf16().chain(std::iter::once(0)).collect();
+
+            let mut sid: *mut c_void = ptr::null_mut();
+
+            unsafe {
+                // Delete any orphaned profile with the same name (shouldn't happen with UUID).
+                let _ = DeleteAppContainerProfile(name_wide.as_ptr());
+
+                let hr = CreateAppContainerProfile(
+                    name_wide.as_ptr(),
+                    display_wide.as_ptr(),
+                    desc_wide.as_ptr(),
+                    ptr::null(),
+                    0,
+                    &mut sid,
+                );
+
+                if hr != S_OK {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("CreateAppContainerProfile failed: HRESULT 0x{:08X}", hr as u32),
+                    ));
+                }
+            }
+
+            // Convert SID to string for icacls.
+            let sid_string = sid_to_string(sid)?;
+
+            tracing::info!(
+                container = %name,
+                sid = %sid_string,
+                "Created AppContainer profile"
+            );
+
+            Ok(Self {
+                name_wide,
+                sid,
+                sid_string,
+                granted_paths: Vec::new(),
+            })
+        }
+
+        /// Grant the AppContainer SID access to a path.
+        ///
+        /// `write` controls whether write access is granted (true) or read-only (false).
+        pub fn grant_access(&mut self, path: &Path, write: bool) -> Result<(), String> {
+            let path_str = path.display().to_string();
+            let perms = if write { "(OI)(CI)(F)" } else { "(OI)(CI)(RX)" };
+
+            let output = std::process::Command::new("icacls")
+                .args([
+                    &path_str,
+                    "/grant",
+                    &format!("*{}:{}", self.sid_string, perms),
+                ])
+                .output()
+                .map_err(|e| format!("failed to run icacls: {e}"))?;
+
+            if output.status.success() {
+                tracing::debug!(path = %path_str, write, "Granted AppContainer access");
+                self.granted_paths.push(path_str);
+                Ok(())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(format!("icacls grant failed for '{}': {}", path_str, stderr.trim()))
+            }
+        }
+
+        /// Revoke all previously granted ACEs.
+        fn revoke_all(&self) {
+            for path_str in &self.granted_paths {
+                let _ = std::process::Command::new("icacls")
+                    .args([
+                        path_str.as_str(),
+                        "/remove",
+                        &format!("*{}", self.sid_string),
+                    ])
+                    .output();
+            }
+        }
+    }
+
+    impl Drop for AppContainer {
+        fn drop(&mut self) {
+            // Revoke filesystem ACEs.
+            self.revoke_all();
+
+            // Delete the container profile.
+            unsafe {
+                let _ = DeleteAppContainerProfile(self.name_wide.as_ptr());
+                // FreeSid for AppContainer SIDs — allocated by CreateAppContainerProfile.
+                // The docs say to use FreeSid.
+                super::restricted::free_sid(self.sid);
+            }
+
+            tracing::debug!("Cleaned up AppContainer profile");
+        }
+    }
+
+    /// Convert a SID pointer to a string (e.g., "S-1-15-2-...").
+    fn sid_to_string(sid: *mut c_void) -> io::Result<String> {
+        unsafe {
+            let mut string_sid: *mut u16 = ptr::null_mut();
+            if ConvertSidToStringSidW(sid, &mut string_sid) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            // Read the wide string.
+            let mut len = 0;
+            while *string_sid.add(len) != 0 {
+                len += 1;
+            }
+            let slice = std::slice::from_raw_parts(string_sid, len);
+            let result = String::from_utf16_lossy(slice);
+
+            LocalFree(string_sid as *mut c_void);
+            Ok(result)
+        }
+    }
+
+    /// Spawn a process inside an AppContainer.
+    ///
+    /// The AppContainer denies all access by default. Before calling this,
+    /// use `container.grant_access()` to allow paths the child needs.
+    ///
+    /// Returns the process info and raw pipe handles for stdout/stderr.
+    pub fn spawn_in_appcontainer(
+        container: &AppContainer,
+        cmd_line: &str,
+        env_block: &[u16],
+    ) -> io::Result<(ProcessInformation, RawHandle, RawHandle)> {
+        unsafe {
+            // ── Create pipes for stdout/stderr ──────────────────────────
+            let sa = SecurityAttributes {
+                length: std::mem::size_of::<SecurityAttributes>() as u32,
+                security_descriptor: ptr::null_mut(),
+                inherit_handle: 1, // TRUE
+            };
+
+            let mut stdout_read: RawHandle = ptr::null_mut();
+            let mut stdout_write: RawHandle = ptr::null_mut();
+            if CreatePipe(&mut stdout_read, &mut stdout_write, &sa, 0) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
+
+            let mut stderr_read: RawHandle = ptr::null_mut();
+            let mut stderr_write: RawHandle = ptr::null_mut();
+            if CreatePipe(&mut stderr_read, &mut stderr_write, &sa, 0) == 0 {
+                CloseHandle(stdout_read);
+                CloseHandle(stdout_write);
+                return Err(io::Error::last_os_error());
+            }
+            SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
+
+            // ── Build SECURITY_CAPABILITIES ─────────────────────────────
+            let sc = SecurityCapabilities {
+                AppContainerSid: container.sid,
+                Capabilities: ptr::null_mut(),
+                CapabilityCount: 0,
+                Reserved: 0,
+            };
+
+            // ── Initialize proc thread attribute list ───────────────────
+            let mut attr_size: usize = 0;
+            // First call: get required size.
+            let _ = InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut attr_size);
+
+            let heap = GetProcessHeap();
+            let attr_list = HeapAlloc(heap, 0, attr_size);
+            if attr_list.is_null() {
+                CloseHandle(stdout_read); CloseHandle(stdout_write);
+                CloseHandle(stderr_read); CloseHandle(stderr_write);
+                return Err(io::Error::new(io::ErrorKind::OutOfMemory, "HeapAlloc failed"));
+            }
+
+            if InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) == 0 {
+                HeapFree(heap, 0, attr_list);
+                CloseHandle(stdout_read); CloseHandle(stdout_write);
+                CloseHandle(stderr_read); CloseHandle(stderr_write);
+                return Err(io::Error::last_os_error());
+            }
+
+            if UpdateProcThreadAttribute(
+                attr_list, 0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                &sc as *const _ as *const c_void,
+                std::mem::size_of::<SecurityCapabilities>(),
+                ptr::null_mut(), ptr::null_mut(),
+            ) == 0 {
+                DeleteProcThreadAttributeList(attr_list);
+                HeapFree(heap, 0, attr_list);
+                CloseHandle(stdout_read); CloseHandle(stdout_write);
+                CloseHandle(stderr_read); CloseHandle(stderr_write);
+                return Err(io::Error::last_os_error());
+            }
+
+            // ── Build STARTUPINFOEXW ────────────────────────────────────
+            let mut si_ex: StartupInfoExW = std::mem::zeroed();
+            si_ex.StartupInfo.cb = std::mem::size_of::<StartupInfoExW>() as u32;
+            si_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si_ex.StartupInfo.hStdInput = ptr::null_mut();
+            si_ex.StartupInfo.hStdOutput = stdout_write;
+            si_ex.StartupInfo.hStdError = stderr_write;
+            si_ex.lpAttributeList = attr_list;
+
+            // ── Create the process ──────────────────────────────────────
+            let mut cmd_wide: Vec<u16> = cmd_line.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut pi: ProcessInformation = std::mem::zeroed();
+
+            let result = CreateProcessW(
+                ptr::null(),
+                cmd_wide.as_mut_ptr(),
+                ptr::null(), // proc attrs
+                ptr::null(), // thread attrs
+                1,           // inherit handles (for pipes)
+                CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                env_block.as_ptr() as *const c_void,
+                ptr::null(), // inherit cwd
+                &si_ex,
+                &mut pi,
+            );
+
+            // Clean up attribute list (no longer needed after CreateProcess).
+            DeleteProcThreadAttributeList(attr_list);
+            HeapFree(heap, 0, attr_list);
+
+            // Close write ends of pipes.
+            CloseHandle(stdout_write);
+            CloseHandle(stderr_write);
+
+            if result == 0 {
+                let err = io::Error::last_os_error();
+                CloseHandle(stdout_read);
+                CloseHandle(stderr_read);
+                return Err(err);
+            }
+
+            Ok((pi, stdout_read, stderr_read))
+        }
+    }
+}
+
+#[cfg(windows)]
+pub use appcontainer::{AppContainer, spawn_in_appcontainer};
 
 #[cfg(test)]
 #[cfg(windows)]
