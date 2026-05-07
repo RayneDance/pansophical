@@ -69,17 +69,14 @@ pub fn handle_initialize(
     let key_name: String = match config.resolve_key(token) {
         Some((name, _)) => name.to_string(),
         None => {
-            if config.keys.is_empty() {
-                // No keys configured — allow anonymous access for development.
-                info!("No keys configured — allowing anonymous access");
-                "anonymous".to_string()
-            } else if token.is_empty() {
+            if token.is_empty() {
+                let msg = if config.keys.is_empty() {
+                    "no keys configured — run `pansophical --init` to generate a config with a demo key"
+                } else {
+                    "authentication required: provide token in params._meta.token"
+                };
                 return (
-                    Err(JsonRpcError::new(
-                        id,
-                        error_codes::AUTH_ERROR,
-                        "authentication required: provide token in params._meta.token",
-                    )),
+                    Err(JsonRpcError::new(id, error_codes::AUTH_ERROR, msg)),
                     None,
                 );
             } else {

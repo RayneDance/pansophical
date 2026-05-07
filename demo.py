@@ -18,6 +18,7 @@ import sys
 import urllib.request
 import urllib.error
 import argparse
+import re
 import textwrap
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -114,13 +115,17 @@ class McpClient:
         self.proc.stdin.write(json.dumps(msg) + "\n")
         self.proc.stdin.flush()
 
-    def initialize(self):
+    def initialize(self, mcp_token=None):
         """Perform the MCP initialize handshake."""
-        resp = self.send("initialize", {
+        params = {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "pansophical-demo", "version": "0.1.0"},
-        })
+        }
+        if mcp_token:
+            params["_meta"] = {"token": mcp_token}
+
+        resp = self.send("initialize", params)
         if "error" in resp:
             raise RuntimeError(f"Initialize failed: {resp['error']}")
 
@@ -273,9 +278,24 @@ def main():
         cprint(C.RED, f"  Failed to start server: {e}")
         sys.exit(1)
 
+    # Read MCP token from config.toml.
+    mcp_token = None
+    try:
+        with open(args.config, "r") as f:
+            config_text = f.read()
+        # Simple extraction: find first `token = "..."` in a [keys.*] section.
+        match = re.search(r'\[keys\.\w+\]\s*\n\s*token\s*=\s*"([^"]+)"', config_text)
+        if match:
+            mcp_token = match.group(1)
+            cprint(C.DIM, f"  Using token from config: {mcp_token[:12]}...")
+        else:
+            cprint(C.YELLOW, "  ⚠ No key token found in config — server may reject requests")
+    except Exception as e:
+        cprint(C.YELLOW, f"  ⚠ Could not read config for token: {e}")
+
     # Initialize.
     try:
-        info = mcp.initialize()
+        info = mcp.initialize(mcp_token)
         server_name = info.get("serverInfo", {}).get("name", "unknown")
         server_ver = info.get("serverInfo", {}).get("version", "?")
         cprint(C.GREEN, f"  ✓ Connected to {server_name} v{server_ver}")
