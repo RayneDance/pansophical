@@ -85,6 +85,16 @@ pub async fn spawn_and_reap(
 
     info!(program = program, "Child spawned");
 
+    // ── Job Object assignment (Windows) ───────────────────────────────
+    #[cfg(windows)]
+    {
+        if let Some(pid) = child.id() {
+            if let Err(e) = assign_to_server_job(pid) {
+                warn!(program = program, pid = pid, "Failed to assign child to Job Object: {e}");
+            }
+        }
+    }
+
     // Take ownership of stdout/stderr handles for reading.
     let mut child_stdout = child.stdout.take();
     let mut child_stderr = child.stderr.take();
@@ -155,6 +165,45 @@ fn truncate_output(data: Vec<u8>, max_bytes: u64) -> Vec<u8> {
     truncated.extend_from_slice(b"\n[output truncated by pansophical]");
     truncated
 }
+
+// ── Windows Job Object ────────────────────────────────────────────────────
+
+#[cfg(windows)]
+use std::sync::OnceLock;
+
+/// Global server Job Object. Initialized once, lives for the server lifetime.
+/// All child processes are assigned to this job so they die when the server exits.
+#[cfg(windows)]
+static SERVER_JOB: OnceLock<crate::sandbox::windows::JobObject> = OnceLock::new();
+
+/// Initialize the global server Job Object. Called once at startup.
+#[cfg(windows)]
+pub fn init_server_job() {
+    match crate::sandbox::windows::create_server_job() {
+        Ok(job) => {
+            let _ = SERVER_JOB.set(job);
+            info!("Server Job Object initialized — children will be reaped on exit");
+        }
+        Err(e) => {
+            warn!("Failed to create server Job Object: {e} — children may orphan on crash");
+        }
+    }
+}
+
+/// Assign a child process PID to the server Job Object.
+#[cfg(windows)]
+fn assign_to_server_job(pid: u32) -> std::io::Result<()> {
+    if let Some(job) = SERVER_JOB.get() {
+        job.assign_pid(pid)
+    } else {
+        Ok(()) // Job not initialized — skip silently.
+    }
+}
+
+/// No-op on non-Windows.
+#[cfg(not(windows))]
+pub fn init_server_job() {}
+
 
 #[cfg(test)]
 mod tests {

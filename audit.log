@@ -49,3 +49,7 @@
 {"ts":"2026-05-07T01:19:00.604793100+00:00","connection_id":"649e0849-70fb-449c-889e-6d273a2665b7","key":"","decision":"connected","detail":"SSE session established"}
 {"ts":"2026-05-07T01:20:19.462249700+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=http","event":"startup"}
 {"ts":"2026-05-07T01:20:22.380023800+00:00","connection_id":"f25ab864-a76b-4fea-a6e5-916e99251303","key":"","decision":"connected","detail":"SSE session established"}
+{"ts":"2026-05-07T01:24:40.264131600+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"Pansophical v0.1.0 starting, transport=stdio","event":"startup"}
+{"ts":"2026-05-07T01:24:40.266386600+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdio transport started, connection_id=f56fd49e-7bce-4a43-b3ca-9560cc5f2b7d","event":"transport_start"}
+{"ts":"2026-05-07T01:24:40.266769300+00:00","connection_id":"f56fd49e-7bce-4a43-b3ca-9560cc5f2b7d","key":"anonymous","decision":"granted","detail":"session initialized","event":"initialize"}
+{"ts":"2026-05-07T01:24:40.266945700+00:00","connection_id":"server","key":"system","decision":"n/a","detail":"stdin closed, connection_id=f56fd49e-7bce-4a43-b3ca-9560cc5f2b7d","event":"transport_close"}

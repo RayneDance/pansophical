@@ -125,6 +125,9 @@ fn run_server(path: &PathBuf) -> Result<()> {
     info!("Config: {}", path.display());
     info!("Transport: {}", config.server.transport);
 
+    // Initialize the Windows Job Object for child process containment.
+    reaper::init_server_job();
+
     // Create the audit log.
     let audit = Arc::new(audit::AuditLog::new(&config.audit));
     audit.log_event("startup", &format!(
