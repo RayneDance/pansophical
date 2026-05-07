@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use crate::authz::AccessRequest;
 use crate::config::schema::Config;
 use crate::confirm::server::{ApprovalResult, ConfirmState};
+use crate::confirm::session::{ApprovalKey, ApprovalScope};
 use crate::tools::McpTool;
 
 pub struct RequestAccessTool {
@@ -101,17 +102,17 @@ impl McpTool for RequestAccessTool {
         let ttl = config.ui.confirm.timeout_secs;
         let port = config.ui.port;
 
-        // Use a task-local or derive connection/key info.
-        // For now, use generic identifiers — the confirm system will
-        // display the resource details to the admin.
-        let key_name = "agent";
-        let connection_id = "request_access";
+        // Get the real session context from the task-local.
+        let session_ctx = crate::transport::stdio::current_session()
+            .ok_or("no session context available")?;
 
         tracing::info!(
             resource_type = resource_type,
             resource = resource,
             permission = permission,
             reason = reason,
+            key = %session_ctx.key_name,
+            conn = %session_ctx.connection_id,
             "LLM requesting elevated access"
         );
 
@@ -121,8 +122,8 @@ impl McpTool for RequestAccessTool {
             &format!("request_access ({reason})"),
             resource,
             &perm_display,
-            key_name,
-            connection_id,
+            &session_ctx.key_name,
+            &session_ctx.connection_id,
             ttl,
             port,
         )
@@ -135,11 +136,33 @@ impl McpTool for RequestAccessTool {
                     scope = ?scope,
                     "Access request approved by admin"
                 );
+
+                // Store an ephemeral grant in the approval cache with the
+                // correct session keys, so subsequent tool calls will find it.
+                // Use tool_name = "*" so ANY tool can use this resource grant.
+                let cache_key = ApprovalKey {
+                    connection_id: session_ctx.connection_id.clone(),
+                    key_name: session_ctx.key_name.clone(),
+                    tool_name: "*".to_string(),
+                    resource_pattern: resource.replace('\\', "/"),
+                    perm: permission.to_string(),
+                };
+
+                // Force at least 5 minutes for "Once" scope so the LLM
+                // has time to retry the operation.
+                let effective_scope = match &scope {
+                    ApprovalScope::Once => ApprovalScope::Minutes(5),
+                    other => other.clone(),
+                };
+                self.confirm_state
+                    .approval_cache
+                    .approve(cache_key, &effective_scope);
+
                 Ok(json!({
                     "content": [{
                         "type": "text",
                         "text": format!(
-                            "✓ Access APPROVED by admin.\n\
+                            "\u{2713} Access APPROVED by admin.\n\
                              Resource: {resource}\n\
                              Type: {resource_type}\n\
                              Permission: {permission}\n\
@@ -159,7 +182,7 @@ impl McpTool for RequestAccessTool {
                     "content": [{
                         "type": "text",
                         "text": format!(
-                            "✗ Access DENIED by admin.\n\
+                            "\u{2717} Access DENIED by admin.\n\
                              Resource: {resource}\n\
                              Type: {resource_type}\n\
                              Permission: {permission}\n\

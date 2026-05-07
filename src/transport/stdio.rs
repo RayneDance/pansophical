@@ -21,6 +21,28 @@ use crate::protocol::messages::*;
 use crate::session::Session;
 use crate::tools::ToolRegistry;
 
+// ── Task-local session context ────────────────────────────────────────────────
+//
+// Set before calling tool.execute() so tools like `request_access` can read
+// the current session's connection_id and key_name without modifying the
+// McpTool trait signature.
+
+/// Session context passed via task-local to tool execution.
+#[derive(Clone, Debug)]
+pub struct SessionContext {
+    pub connection_id: String,
+    pub key_name: String,
+}
+
+tokio::task_local! {
+    static CURRENT_SESSION: SessionContext;
+}
+
+/// Get the current task's session context (if set).
+pub fn current_session() -> Option<SessionContext> {
+    CURRENT_SESSION.try_with(|s| s.clone()).ok()
+}
+
 /// Run the stdio transport loop. Blocks until stdin is closed.
 pub async fn run(config: Config, audit: Arc<AuditLog>, confirm_state: Arc<ConfirmState>) {
     let stdin = tokio::io::stdin();
@@ -369,7 +391,65 @@ async fn handle_tools_call(
             ).await
         }
         AuthzDecision::Denied { explain } => {
-            // Audit: denied.
+            // ── Check ephemeral grants (from request_access approvals) ────
+            // The approval cache may contain grants from admin-approved
+            // request_access calls. Check if all NON-TOOL access requests
+            // have matching cached approvals. Tool-type requests are skipped
+            // because the tool is registered and callable — the denial is
+            // about resource access, not tool existence.
+            let resource_requests: Vec<_> = access_requests
+                .iter()
+                .filter(|r| r.target_type != crate::config::policy_target::PolicyTargetType::Tool)
+                .collect();
+            let mut all_covered = !resource_requests.is_empty();
+            for req in &resource_requests {
+                // Normalize path separators for matching.
+                let resource = req.resource.replace('\\', "/");
+                let cache_key = crate::confirm::session::ApprovalKey {
+                    connection_id: session.connection_id.clone(),
+                    key_name: session.key_name.clone(),
+                    tool_name: tool_name.to_string(),
+                    resource_pattern: resource.clone(),
+                    perm: req.perm.to_string(),
+                };
+                if !confirm_state.approval_cache.check(&cache_key) {
+                    // Also try with just the resource (tool-agnostic grant).
+                    let generic_key = crate::confirm::session::ApprovalKey {
+                        connection_id: session.connection_id.clone(),
+                        key_name: session.key_name.clone(),
+                        tool_name: "*".to_string(),
+                        resource_pattern: resource.clone(),
+                        perm: req.perm.to_string(),
+                    };
+                    if !confirm_state.approval_cache.check(&generic_key) {
+                        all_covered = false;
+                        break;
+                    }
+                }
+            }
+
+            if all_covered {
+                // Ephemeral grants cover all denied requests — allow execution.
+                info!(
+                    tool = tool_name,
+                    "Authz denied by policy, but ephemeral grant covers all requests"
+                );
+                audit.log(
+                    &AuditEntry::new(&session.connection_id, &session.key_name)
+                        .with_tool(tool_name)
+                        .with_decision("granted")
+                        .with_detail("ephemeral grant override"),
+                );
+
+                let env_grants = authz::collect_env_grants(key_config);
+                let sandbox_profile = crate::sandbox::SandboxProfile::from_key_config(key_config);
+                return crate::sandbox::with_profile(
+                    sandbox_profile,
+                    execute_tool(id, tool, &arguments, config, audit, session, tool_name, &env_grants),
+                ).await;
+            }
+
+            // No ephemeral grants — deny as normal.
             let detail = if let Some(ref diff) = explain {
                 serde_json::to_string(diff).unwrap_or_default()
             } else {
@@ -412,7 +492,16 @@ async fn execute_tool(
     tool_name: &str,
     granted_env: &[(String, String)],
 ) -> Value {
-    match tool.execute(arguments, config, granted_env).await {
+    let ctx = SessionContext {
+        connection_id: session.connection_id.clone(),
+        key_name: session.key_name.clone(),
+    };
+
+    let result = CURRENT_SESSION
+        .scope(ctx, tool.execute(arguments, config, granted_env))
+        .await;
+
+    match result {
         Ok(result) => {
             audit.log(
                 &AuditEntry::new(&session.connection_id, &session.key_name)
