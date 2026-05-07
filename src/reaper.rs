@@ -38,8 +38,12 @@ pub enum ReapResult {
 /// Spawn a child process with environment stripping and timeout enforcement.
 ///
 /// On Windows with `sandbox.enabled = true`, attempts to spawn via
-/// `CreateProcessWithTokenW` with a Low Integrity restricted token.
+/// `CreateProcessAsUserW` with a Low Integrity restricted token.
 /// Falls back to normal spawn if restricted spawn fails.
+///
+/// If `sandbox_profile` is provided, write paths in the profile are
+/// labeled with Low integrity before spawn, allowing the sandboxed
+/// child to write to them while blocking all other locations.
 pub async fn spawn_and_reap(
     program: &str,
     args: &[String],
@@ -47,6 +51,7 @@ pub async fn spawn_and_reap(
     granted_env: &[(String, String)],
     timeout_secs: u64,
     max_output_bytes: u64,
+    sandbox_profile: Option<&crate::sandbox::SandboxProfile>,
 ) -> ReapResult {
     // Build the environment variable list.
     let env_vars = build_env_vars(sandbox_config, granted_env);
@@ -54,6 +59,11 @@ pub async fn spawn_and_reap(
     // Try sandboxed spawn on Windows.
     #[cfg(windows)]
     if sandbox_config.enabled {
+        // Prepare write paths — set Low integrity labels so the child can write there.
+        if let Some(profile) = sandbox_profile {
+            crate::sandbox::prepare_write_paths(profile);
+        }
+
         match spawn_restricted_windows(program, args, &env_vars, timeout_secs, max_output_bytes).await {
             Ok(result) => return result,
             Err(e) => {
@@ -398,7 +408,7 @@ mod tests {
         };
         let program = if cfg!(windows) { "cmd" } else { "echo" };
 
-        let result = spawn_and_reap(program, &args, &test_sandbox(), &[], 5, 1024).await;
+        let result = spawn_and_reap(program, &args, &test_sandbox(), &[], 5, 1024, None).await;
 
         match result {
             ReapResult::Completed { exit_code, stdout, .. } => {
@@ -421,7 +431,7 @@ mod tests {
         };
         let program = if cfg!(windows) { "cmd" } else { "env" };
 
-        let result = spawn_and_reap(program, &args, &test_sandbox(), &[], 5, 65536).await;
+        let result = spawn_and_reap(program, &args, &test_sandbox(), &[], 5, 65536, None).await;
 
         match result {
             ReapResult::Completed { stdout, .. } => {
@@ -446,7 +456,7 @@ mod tests {
         };
         let program = if cfg!(windows) { "cmd" } else { "sleep" };
 
-        let result = spawn_and_reap(program, &args, &test_sandbox(), &[], 1, 1024).await;
+        let result = spawn_and_reap(program, &args, &test_sandbox(), &[], 1, 1024, None).await;
 
         match result {
             ReapResult::TimedOut { .. } => {} // expected
@@ -456,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_nonexistent() {
-        let result = spawn_and_reap("nonexistent_binary_12345", &[], &test_sandbox(), &[], 5, 1024).await;
+        let result = spawn_and_reap("nonexistent_binary_12345", &[], &test_sandbox(), &[], 5, 1024, None).await;
         match result {
             ReapResult::SpawnFailed(msg) => assert!(msg.contains("nonexistent_binary_12345")),
             other => panic!("expected SpawnFailed, got {other:?}"),
@@ -475,7 +485,7 @@ mod tests {
         let result = spawn_and_reap(
             program, &args, &test_sandbox(),
             &[("MY_GRANTED_VAR".into(), "granted_value".into())],
-            5, 65536,
+            5, 65536, None,
         ).await;
 
         match result {
@@ -495,7 +505,7 @@ mod tests {
         sandbox.enabled = true;
 
         let args: Vec<String> = vec!["/C".into(), "echo".into(), "sandboxed_hello".into()];
-        let result = spawn_and_reap("cmd", &args, &sandbox, &[], 5, 1024).await;
+        let result = spawn_and_reap("cmd", &args, &sandbox, &[], 5, 1024, None).await;
 
         match result {
             ReapResult::Completed { exit_code, stdout, .. } => {
@@ -520,7 +530,7 @@ mod tests {
 
         // `whoami /groups` shows the integrity level of the process.
         let args = vec!["/C".into(), "whoami".into(), "/groups".into()];
-        let result = spawn_and_reap("cmd", &args, &sandbox, &[], 5, 65536).await;
+        let result = spawn_and_reap("cmd", &args, &sandbox, &[], 5, 65536, None).await;
 
         match result {
             ReapResult::Completed { exit_code, stdout, .. } => {
@@ -534,5 +544,55 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    /// Full write-control test:
+    /// 1. Create a dir with explicit Medium integrity → Low integrity process can't write
+    /// 2. Set the dir to Low integrity → Low integrity process CAN write
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn sandboxed_write_control_via_integrity_labels() {
+        let test_dir = std::env::temp_dir().join(format!("pansophical_wc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let dir_str = test_dir.display().to_string();
+
+        // Set explicit Medium integrity on the dir.
+        let icacls_out = std::process::Command::new("icacls")
+            .args([&dir_str, "/setintegritylevel", "(OI)(CI)M"])
+            .output()
+            .expect("icacls failed");
+        assert!(icacls_out.status.success(), "icacls set Medium failed");
+
+        let mut sandbox = test_sandbox();
+        sandbox.enabled = true;
+
+        // Pass path via env var to avoid cmd.exe quoting issues with long paths.
+        let env = vec![("TESTDIR".into(), dir_str.clone())];
+
+        // 1. Try to write to Medium-integrity dir from Low-integrity process.
+        let args = vec!["/C".into(), "copy nul %TESTDIR%\\test.txt".into()];
+        let _ = spawn_and_reap("cmd", &args, &sandbox, &env, 5, 4096, None).await;
+
+        let blocked = !test_dir.join("test.txt").exists();
+
+        // 2. Set dir to Low integrity → should allow writes.
+        let icacls_out = std::process::Command::new("icacls")
+            .args([&dir_str, "/setintegritylevel", "(OI)(CI)L"])
+            .output()
+            .expect("icacls failed");
+        assert!(icacls_out.status.success(), "icacls set Low failed");
+
+        let args2 = vec!["/C".into(), "copy nul %TESTDIR%\\test2.txt".into()];
+        let _ = spawn_and_reap("cmd", &args2, &sandbox, &env, 5, 4096, None).await;
+
+        let allowed = test_dir.join("test2.txt").exists();
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&test_dir);
+
+        assert!(blocked, "Low integrity process should NOT write to Medium integrity dir");
+        assert!(allowed, "Low integrity process SHOULD write to Low integrity dir");
     }
 }

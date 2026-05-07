@@ -120,8 +120,48 @@ impl SandboxProfile {
         if path.is_absolute() {
             self.exec_paths.push(path);
         } else {
-            // Relative or bare name — add as-is, OS will resolve via PATH.
             self.exec_paths.push(path);
+        }
+    }
+}
+
+/// Set the integrity label on a path to Low, allowing Low Integrity processes to write.
+///
+/// Uses `icacls <path> /setintegritylevel (OI)(CI)L`.
+/// This is idempotent — calling it multiple times on the same path is safe.
+#[cfg(windows)]
+pub fn set_low_integrity_label(path: &std::path::Path) -> Result<(), String> {
+    let path_str = path.display().to_string();
+    let output = std::process::Command::new("icacls")
+        .args([&path_str, "/setintegritylevel", "(OI)(CI)L"])
+        .output()
+        .map_err(|e| format!("failed to run icacls: {e}"))?;
+
+    if output.status.success() {
+        tracing::debug!(path = %path_str, "Set Low integrity label");
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("icacls failed for '{}': {}", path_str, stderr.trim()))
+    }
+}
+
+/// Prepare write paths for a sandboxed Low Integrity process.
+///
+/// Sets Low integrity labels on all write_paths in the profile so the
+/// sandboxed child can write to them. Other paths remain Medium integrity.
+#[cfg(windows)]
+pub fn prepare_write_paths(profile: &SandboxProfile) {
+    for path in &profile.write_paths {
+        let clean = path.display().to_string().trim_end_matches("/**").to_string();
+        let clean_path = std::path::Path::new(&clean);
+
+        if clean_path.exists() {
+            if let Err(e) = set_low_integrity_label(clean_path) {
+                tracing::warn!(path = %clean, error = %e, "Failed to set Low integrity label");
+            }
+        } else {
+            tracing::debug!(path = %clean, "Write path does not exist yet — skipping integrity label");
         }
     }
 }

@@ -292,6 +292,7 @@ impl McpTool for ScriptTool {
             granted_env,
             config.limits.tool_timeout_secs,
             config.limits.max_output_bytes,
+            None, // TODO: build SandboxProfile from key config
         )
         .await;
 
