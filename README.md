@@ -1,8 +1,6 @@
 # Pansophical
 
-This is a work in progress. I make no guaruntees about security or safety. This was almost exclusively generated via LLM, and I have reviewed maybe 10% of the code. It compiles, it runs, and it appears to work for the tests I've had time to run. I make no guaruntees that the sandboxing will work as advertised. Use at your own risk.
-
-Releases won't be a thing until I've done some significant review and testing.
+> **⚠️ Work in progress.** This project is under active development and was largely LLM-generated. I make no guarantees about security or safety. The sandboxing has not been fully audited. Use at your own risk — releases won't happen until significant review and testing is complete.
 
 **Security-first MCP server with intersection-based authorization and OS-level sandboxing.**
 
@@ -26,7 +24,7 @@ MCP gives agents access to your filesystem, shell, and APIs. Most MCP servers tr
 - **Auto-deny on timeout** — unconfirmed requests are denied after the configured timeout
 
 ### Sandboxing
-- **Windows AppContainer** (primary) — strongest Windows isolation; denies all filesystem and network access by default, only explicitly granted paths are accessible
+- **Windows AppContainer** (primary) — strongest Windows isolation; denies all filesystem and network access by default, only explicitly granted paths are accessible via `icacls` ACE grants
 - **Windows Low Integrity** (fallback) — restricted token with Low integrity level
 - **Linux Landlock** (kernel 5.13+) — path-based filesystem restrictions via `pre_exec` hook; read, write, and execute paths enforced from `SandboxProfile`
 - **Network deny** — TCP bind + connect blocked via Landlock V5 (kernel 6.7+) on Linux; AppContainer on Windows
@@ -34,6 +32,7 @@ MCP gives agents access to your filesystem, shell, and APIs. Most MCP servers tr
 - **Job Objects** — `KILL_ON_JOB_CLOSE` prevents orphaned child processes (Windows)
 - **Environment stripping** — child processes start with an empty environment; only `env_baseline` vars are passed
 - **Configurable fallback** — `allow_fallback = false` refuses execution when the sandbox can't initialize, preventing silent security degradation
+- **Builtin tools run in-process** — builtins like `read_file` execute directly via `tokio::fs` after authz validation, bypassing the sandbox (which is reserved for untrusted script tools)
 
 ### Operations
 - **Script tools** — define custom tools via TOML without writing Rust
@@ -56,7 +55,7 @@ cargo build --release
 ./target/release/pansophical --init
 ```
 
-This generates `config.toml` with a random server secret and a `tools/` directory for script tool definitions.
+This generates `config.toml` with a random server secret and a `tools/` directory with example script tool definitions.
 
 ### 3. Add a key
 
@@ -84,11 +83,11 @@ perm   = "rw"
 
 ```bash
 # Stdio mode (for local agents like Claude Desktop, Cursor, etc.)
-./target/release/pansophical
+./target/release/pansophical --config config.toml
 
 # HTTP mode (for remote agents)
+# Set transport = "http" in config.toml
 ./target/release/pansophical --config config.toml
-# Then set transport = "http" in config.toml
 
 # Both simultaneously
 # Set transport = "both" in config.toml
@@ -151,21 +150,43 @@ env_baseline   = ["PATH", "TERM", "LANG", "HOME"]
 
 ## Script tools
 
-Define custom tools in `tools/*.toml`:
+Define custom tools in `tools/*.toml`. Top-level keys — no `[tool]` section nesting:
 
 ```toml
-[tool]
-name        = "git_status"
-description = "Show git status for a repository"
-command     = "git"
-args        = ["status", "--porcelain"]
+name            = "git_status"
+description     = "Show git status in short format"
+command         = "git"
+args            = ["-C", "{path}", "status", "--short"]
+allow_shell     = false
+arg_passthrough = false
 
-[tool.security]
-allow_shell     = false   # reject shell interpreters
-arg_passthrough = false   # don't pass agent-supplied args
+[[parameters]]
+name        = "path"
+description = "Repository path"
+required    = true
+
+[[resources]]
+type = "filesystem"
+path_from_arg = "path"
+perm = "r"
 ```
 
-Script tools run through the same reaper pipeline as built-in tools — with environment stripping, timeout enforcement, and sandbox assignment.
+### Argument interpolation
+
+Arguments can reference parameters with `{param_name}` placeholders. Parameters not referenced by any placeholder are appended at the end (backward-compatible with positional style). Optional parameters whose placeholder can't be filled cause the entire arg to be dropped.
+
+### Safety checks
+
+Script tools enforce several safety checks by default:
+- **Shell rejection** — commands matching `bash`, `cmd`, `powershell`, etc. are rejected unless `allow_shell = true`
+- **Flag injection** — argument values starting with `-` are rejected unless the parameter sets `allow_flags = true`
+- **Metacharacter rejection** — values containing `;`, `&`, `|`, `>`, `` ` ``, `$`, `(`, `)` are rejected unless `arg_passthrough = true`
+
+### Windows note
+
+On Windows, commands like `echo` are shell builtins, not standalone executables. Script tools using shell builtins should set `command = "cmd"` with `args = ["/C", "echo", ...]` and `allow_shell = true`. Alternatively, use standalone executables that don't require a shell.
+
+Script tools run through the same reaper pipeline as external commands — with environment stripping, timeout enforcement, and AppContainer/Landlock sandbox assignment.
 
 ## Security model
 
@@ -193,8 +214,8 @@ Agent request
     └─────────┘
          │
     ┌────┴────┐
-    │ Granted │──▶ Reaper spawns sandboxed child
-    └─────────┘
+    │ Granted │──▶ Builtin: in-process execution
+    └─────────┘   Script: reaper spawns sandboxed child
          │
          ▼
     Audit entry logged
@@ -204,16 +225,34 @@ Agent request
 
 | Platform | Primary | Fallback | Network |
 |----------|---------|----------|---------|
-| **Windows** | AppContainer (deny-all + explicit ACEs) | Low Integrity restricted token | AppContainer denies by default |
+| **Windows** | AppContainer (deny-all + explicit ACEs via `icacls /T`) | Low Integrity restricted token | AppContainer denies by default |
 | **Linux** | Landlock V5 (filesystem + network) | Unsandboxed (if `allow_fallback = true`) | Landlock `AccessNet` deny (kernel 6.7+) |
 
+**Windows AppContainer details:**
+- Each tool invocation creates an ephemeral AppContainer profile with a unique SID
+- Filesystem access is granted via `icacls /grant *SID:(OI)(CI)(perms) /T` for recursive propagation
+- System directories (`System32`, `SysWOW64`) are already accessible via the built-in `ALL APPLICATION PACKAGES` ACE — no explicit grants needed
+- Directory traversal works without ancestor grants because `SeChangeNotifyPrivilege` (BYPASS_TRAVERSE_CHECKING) is enabled by default
+- The container profile and all ACEs are cleaned up on drop
+
 Both platforms: Job Object / `PR_SET_PDEATHSIG` kills children if the server dies. Environment is stripped to `env_baseline` only.
+
+### Builtin vs script tool execution
+
+| | Builtin tools | Script tools |
+|---|---|---|
+| **Execution** | In-process (`tokio::fs`, etc.) | Out-of-process via reaper |
+| **Sandboxing** | Authz layer only | OS-level (AppContainer / Landlock) |
+| **Timeout** | N/A | Configurable via `tool_timeout_secs` |
+| **Environment** | Server's own | Stripped to `env_baseline` |
+
+Builtin tools bypass the sandbox because they perform simple, well-defined operations (file read, directory list, etc.) that are already gated by the authorization engine. Script tools run arbitrary external commands and require OS-level isolation.
 
 ## Built-in tools
 
 | Tool | Perm | Description |
 |------|------|-------------|
-| `builtin_read_file` | `r` | Read file contents |
+| `builtin_read_file` | `r` | Read file contents (in-process) |
 | `builtin_write_file` | `w` | Write file contents |
 | `builtin_list_dir` | `r` | List directory contents |
 | `builtin_file_info` | `r` | File/directory metadata (size, type, modified time, readonly) |
@@ -246,14 +285,14 @@ src/
 ├── audit/               # Append-only JSON audit log
 ├── confirm/             # HITL confirmation (HMAC tokens, browser UI, session cache)
 ├── sandbox/
-│   ├── mod.rs           # SandboxProfile, cross-platform interface
-│   ├── windows.rs       # AppContainer + Low IL restricted token
+│   ├── mod.rs           # SandboxProfile, cross-platform interface, glob stripping
+│   ├── windows.rs       # AppContainer + Low IL restricted token + Win32 security FFI
 │   └── linux.rs         # Landlock + PR_SET_PDEATHSIG
-├── reaper.rs            # Process spawning, timeout, output caps
+├── reaper.rs            # Process spawning, timeout, output caps, sandbox diagnostics
 ├── limits.rs            # Rate limiter + concurrency gate (token bucket)
 ├── tools/
-│   ├── builtin/         # 9 built-in tools
-│   └── script.rs        # TOML-defined script tool loader
+│   ├── builtin/         # 9 built-in tools (in-process execution)
+│   └── script.rs        # TOML-defined script tool loader + safety checks
 ├── transport/
 │   ├── stdio.rs         # JSON-RPC over stdin/stdout
 │   └── http.rs          # HTTP/SSE transport with bearer auth
