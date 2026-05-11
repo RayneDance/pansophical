@@ -94,6 +94,8 @@ class McpClient:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            encoding="utf-8",
+            errors="replace",
         )
         # Drain stderr in a background thread to prevent pipe deadlock.
         # Without this, the server's tracing logs fill the stderr pipe buffer
@@ -258,6 +260,14 @@ def call_vertex(project, access_token, messages, tools_decl):
     if tools_decl:
         body["tools"] = [{"functionDeclarations": tools_decl}]
 
+    # Enable thinking so the API returns thoughtSignature fields needed
+    # for tool-call round-tripping.  Works with both 2.5 and 3.x models.
+    body["generationConfig"] = {
+        "thinkingConfig": {
+            "includeThoughts": True,
+        }
+    }
+
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -278,22 +288,26 @@ def call_vertex(project, access_token, messages, tools_decl):
 
 
 def extract_response(vertex_resp):
-    """Extract text and/or function calls from a Vertex response."""
+    """Extract text, function calls, and raw parts from a Vertex response.
+
+    Returns (text, func_calls, raw_parts) where raw_parts preserves any
+    opaque fields like ``thoughtSignature`` needed for round-tripping.
+    """
     candidates = vertex_resp.get("candidates", [])
     if not candidates:
-        return None, []
+        return None, [], []
 
     parts = candidates[0].get("content", {}).get("parts", [])
     text_parts = []
     func_calls = []
 
     for part in parts:
-        if "text" in part:
+        if "text" in part and not part.get("thought"):
             text_parts.append(part["text"])
         if "functionCall" in part:
             func_calls.append(part["functionCall"])
 
-    return "\n".join(text_parts) if text_parts else None, func_calls
+    return "\n".join(text_parts) if text_parts else None, func_calls, parts
 
 # ── Main Loop ──────────────────────────────────────────────────────────────
 
@@ -431,15 +445,16 @@ def main():
                     cprint(C.RED, f"\n  Vertex error: {e}")
                     break
 
-                text, func_calls = extract_response(vertex_resp)
+                text, func_calls, raw_parts = extract_response(vertex_resp)
 
                 if not func_calls:
                     # No tool calls — show the text response.
                     if text:
-                        # Add to history.
+                        # Add to history — preserve raw parts so any
+                        # thoughtSignature fields are round-tripped.
                         messages.append({
                             "role": "model",
-                            "parts": [{"text": text}],
+                            "parts": raw_parts,
                         })
                         print()
                         cprint(C.BOLD + C.GREEN, "  Vertex ▸ ", end="")
@@ -456,7 +471,6 @@ def main():
                     break
 
                 # Execute tool calls.
-                model_parts = []
                 func_response_parts = []
 
                 for fc in func_calls:
@@ -464,8 +478,6 @@ def main():
                     tool_args = fc.get("args", {})
 
                     cprint(C.MAGENTA, f"\n  ⚙ Calling tool: {C.BOLD}{tool_name}{C.RESET}{C.MAGENTA} {json.dumps(tool_args)}")
-
-                    model_parts.append({"functionCall": fc})
 
                     # Call via MCP.
                     result = mcp.call_tool(tool_name, tool_args)
@@ -492,10 +504,13 @@ def main():
                         }
                     })
 
-                # Add the model's function call to history.
+                # Add the model's function call to history — use raw_parts
+                # from the API response so that thoughtSignature fields are
+                # preserved exactly as received.  Gemini 3.x *requires* these
+                # signatures to be round-tripped; 2.5 models benefit from it.
                 messages.append({
                     "role": "model",
-                    "parts": model_parts,
+                    "parts": raw_parts,
                 })
 
                 # Add the function results.

@@ -446,7 +446,20 @@ async fn handle_tools_call(
                 );
 
                 let env_grants = authz::collect_env_grants(key_config);
-                let sandbox_profile = crate::sandbox::SandboxProfile::from_key_config(key_config);
+                let mut sandbox_profile = crate::sandbox::SandboxProfile::from_key_config(key_config);
+
+                // Augment the sandbox profile with ephemeral grant paths.
+                // Without this, the AppContainer denies access at the OS level
+                // even though the authz cache approved the resource.
+                for req in &resource_requests {
+                    let path = std::path::PathBuf::from(&req.resource);
+                    if req.perm.contains(crate::config::perm::Perm::WRITE) {
+                        sandbox_profile.write_paths.push(path);
+                    } else {
+                        sandbox_profile.read_paths.push(path);
+                    }
+                }
+
                 return crate::sandbox::with_profile(
                     sandbox_profile,
                     execute_tool(id, tool, &arguments, config, audit, session, tool_name, &env_grants),

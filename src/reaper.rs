@@ -63,6 +63,13 @@ pub async fn spawn_and_reap(
     if sandbox_config.enabled {
         // Prepare write paths from the task-local sandbox profile.
         if let Some(profile) = crate::sandbox::current_profile() {
+            info!(
+                program = program,
+                read_paths = ?profile.read_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                write_paths = ?profile.write_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                exec_paths = ?profile.exec_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                "Sandbox profile for child process"
+            );
             crate::sandbox::prepare_write_paths(&profile);
             
             // 1. Try AppContainer (Strongest isolation)
@@ -76,6 +83,8 @@ pub async fn spawn_and_reap(
                     );
                 }
             }
+        } else {
+            warn!(program = program, "No sandbox profile in task-local — skipping AppContainer");
         }
 
         // 2. Try Low Integrity Restricted Token (Fallback isolation)
@@ -310,25 +319,75 @@ async fn spawn_appcontainer_windows(
 
     // Create AppContainer profile
     let mut container = AppContainer::create()?;
+    info!(sid = %container.sid_string, "AppContainer created");
+
+    // Write diagnostics to file for debugging (tracing goes to stderr which demo.py captures).
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open("sandbox_debug.log")
+        {
+            let _ = writeln!(f, "=== AppContainer spawn ===");
+            let _ = writeln!(f, "SID: {}", container.sid_string);
+            let _ = writeln!(f, "write_paths: {:?}", profile.write_paths);
+            let _ = writeln!(f, "read_paths: {:?}", profile.read_paths);
+            let _ = writeln!(f, "exec_paths: {:?}", profile.exec_paths);
+        }
+    }
 
     // Grant access to write paths
     for path in &profile.write_paths {
-        let clean = path.display().to_string().trim_end_matches("/**").to_string();
+        let raw = path.display().to_string();
+        let clean = crate::sandbox::strip_glob_suffix(&raw);
         let clean_path = std::path::Path::new(&clean);
-        if clean_path.exists() {
-            if let Err(e) = container.grant_access(clean_path, true) {
-                warn!(path = %clean, error = %e, "Failed to grant AppContainer write access");
+        let exists = clean_path.exists();
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("sandbox_debug.log") {
+            use std::io::Write;
+            let _ = writeln!(f, "WRITE raw={raw:?} cleaned={clean:?} exists={exists}");
+        }
+        if exists {
+            match container.grant_access(clean_path, true) {
+                Ok(()) => {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("sandbox_debug.log") {
+                        use std::io::Write;
+                        let _ = writeln!(f, "  -> GRANTED write on {clean}");
+                    }
+                }
+                Err(e) => {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("sandbox_debug.log") {
+                        use std::io::Write;
+                        let _ = writeln!(f, "  -> FAILED write on {clean}: {e}");
+                    }
+                }
             }
         }
     }
 
     // Grant access to read paths
     for path in &profile.read_paths {
-        let clean = path.display().to_string().trim_end_matches("/**").to_string();
+        let raw = path.display().to_string();
+        let clean = crate::sandbox::strip_glob_suffix(&raw);
         let clean_path = std::path::Path::new(&clean);
-        if clean_path.exists() {
-            if let Err(e) = container.grant_access(clean_path, false) {
-                warn!(path = %clean, error = %e, "Failed to grant AppContainer read access");
+        let exists = clean_path.exists();
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("sandbox_debug.log") {
+            use std::io::Write;
+            let _ = writeln!(f, "READ  raw={raw:?} cleaned={clean:?} exists={exists}");
+        }
+        if exists {
+            match container.grant_access(clean_path, false) {
+                Ok(()) => {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("sandbox_debug.log") {
+                        use std::io::Write;
+                        let _ = writeln!(f, "  -> GRANTED read on {clean}");
+                    }
+                }
+                Err(e) => {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("sandbox_debug.log") {
+                        use std::io::Write;
+                        let _ = writeln!(f, "  -> FAILED read on {clean}: {e}");
+                    }
+                }
             }
         }
     }
@@ -340,8 +399,15 @@ async fn spawn_appcontainer_windows(
         cmd_line.push_str(&shell_escape_win(arg));
     }
 
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("sandbox_debug.log") {
+        use std::io::Write;
+        let _ = writeln!(f, "CMD: {cmd_line}");
+        let _ = writeln!(f, "---");
+    }
+
     let env_block = build_env_block(env_vars);
-    
+
+    info!(cmd_line = %cmd_line, sid = %container.sid_string, "AppContainer: spawning child process");
     let (pi, stdout_handle, stderr_handle) = spawn_in_appcontainer(&container, &cmd_line, &env_block)?;
 
     let pid = pi.dwProcessId;

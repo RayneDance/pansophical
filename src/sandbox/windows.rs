@@ -674,6 +674,111 @@ pub mod appcontainer {
         safe fn CloseHandle(handle: RawHandle) -> i32;
     }
 
+    // ── Win32 Security API for non-inheriting ACEs ──────────────────────────
+
+    const SE_FILE_OBJECT: u32 = 1;
+    const DACL_SECURITY_INFORMATION: u32 = 0x00000004;
+    const UNPROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x20000000;
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const GENERIC_READ: u32 = 0x80000000;
+    const GENERIC_EXECUTE: u32 = 0x20000000;
+    const FILE_LIST_DIRECTORY: u32 = 0x0001;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_TRAVERSE: u32 = 0x0020;
+    const READ_CONTROL: u32 = 0x00020000;
+    const SYNCHRONIZE: u32 = 0x00100000;
+
+    // Minimal read+traverse access mask for directories
+    const DIR_TRAVERSE_MASK: u32 =
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct AclSizeInformation {
+        AceCount: u32,
+        AclBytesInUse: u32,
+        AclBytesFree: u32,
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct AceHeader {
+        AceType: u8,
+        AceFlags: u8,
+        AceSize: u16,
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct AccessAllowedAce {
+        Header: AceHeader,
+        Mask: u32,
+        SidStart: u32, // first DWORD of the SID (variable length follows)
+    }
+
+    unsafe extern "system" {
+        fn ConvertStringSidToSidW(
+            string_sid: *const u16,
+            sid: *mut *mut c_void,
+        ) -> i32;
+
+        fn GetLengthSid(sid: *const c_void) -> u32;
+
+        fn GetNamedSecurityInfoW(
+            object_name: *const u16,
+            object_type: u32,
+            security_info: u32,
+            owner: *mut *mut c_void,
+            group: *mut *mut c_void,
+            dacl: *mut *mut c_void,
+            sacl: *mut *mut c_void,
+            security_descriptor: *mut *mut c_void,
+        ) -> u32; // returns ERROR_SUCCESS (0) on success
+
+        fn SetNamedSecurityInfoW(
+            object_name: *mut u16,
+            object_type: u32,
+            security_info: u32,
+            owner: *const c_void,
+            group: *const c_void,
+            dacl: *const c_void,
+            sacl: *const c_void,
+        ) -> u32;
+
+        fn GetAclInformation(
+            acl: *const c_void,
+            info: *mut c_void,
+            info_length: u32,
+            info_class: u32,
+        ) -> i32;
+
+        fn GetAce(
+            acl: *const c_void,
+            ace_index: u32,
+            ace: *mut *mut c_void,
+        ) -> i32;
+
+        fn InitializeAcl(
+            acl: *mut c_void,
+            acl_length: u32,
+            acl_revision: u32,
+        ) -> i32;
+
+        fn AddAce(
+            acl: *mut c_void,
+            acl_revision: u32,
+            starting_ace_index: u32,
+            ace_list: *const c_void,
+            ace_list_length: u32,
+        ) -> i32;
+
+        fn CopySid(
+            dest_length: u32,
+            dest: *mut c_void,
+            source: *const c_void,
+        ) -> i32;
+    }
+
     // ── AppContainer lifecycle ───────────────────────────────────────────────
 
     /// Managed AppContainer profile with RAII cleanup.
@@ -740,30 +845,187 @@ pub mod appcontainer {
             })
         }
 
+        /// Grant traverse-only (read, non-inheriting) access on a single directory.
+        ///
+        /// This uses Win32 `SetNamedSecurityInfoW` directly instead of `icacls`
+        /// because `icacls /grant` always propagates ACEs to all children,
+        /// which takes 88+ seconds on large directories like `AppData\Local`.
+        ///
+        /// The ACE has `AceFlags = 0` (no OI/CI), so it applies ONLY to the
+        /// directory object itself, not to anything inside it.
+        fn grant_traverse_only(sid_string: &str, path: &str) -> Result<(), String> {
+            unsafe {
+                // 1. Convert SID string → binary SID
+                let sid_wide: Vec<u16> = sid_string.encode_utf16().chain(std::iter::once(0)).collect();
+                let mut sid_ptr: *mut c_void = ptr::null_mut();
+                if ConvertStringSidToSidW(sid_wide.as_ptr(), &mut sid_ptr) == 0 {
+                    return Err(format!("ConvertStringSidToSidW failed: {}", io::Error::last_os_error()));
+                }
+                let sid_len = GetLengthSid(sid_ptr);
+
+                // 2. Read existing DACL
+                let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+                let mut existing_dacl: *mut c_void = ptr::null_mut();
+                let mut sd: *mut c_void = ptr::null_mut();
+                let err = GetNamedSecurityInfoW(
+                    path_wide.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(), ptr::null_mut(),
+                    &mut existing_dacl, ptr::null_mut(),
+                    &mut sd,
+                );
+                if err != 0 {
+                    LocalFree(sid_ptr);
+                    return Err(format!("GetNamedSecurityInfoW failed: error {}", err));
+                }
+
+                // 3. Get existing ACL info
+                let mut acl_info: AclSizeInformation = std::mem::zeroed();
+                let acl_info_size = std::mem::size_of::<AclSizeInformation>() as u32;
+                // AclSizeInformation class = 2
+                if !existing_dacl.is_null() {
+                    GetAclInformation(existing_dacl, &mut acl_info as *mut _ as *mut c_void, acl_info_size, 2);
+                }
+
+                // 4. Build new ACE (ACCESS_ALLOWED_ACE with no inheritance flags)
+                let ace_size = (std::mem::size_of::<AccessAllowedAce>() - std::mem::size_of::<u32>() + sid_len as usize) as u16;
+
+                // 5. Calculate new ACL size: existing ACEs + new ACE
+                let new_acl_size = if !existing_dacl.is_null() {
+                    acl_info.AclBytesInUse + ace_size as u32
+                } else {
+                    8 + ace_size as u32 // 8 bytes for ACL header
+                };
+
+                // Allocate new ACL on the heap
+                let new_acl = HeapAlloc(GetProcessHeap(), 0, new_acl_size as usize);
+                if new_acl.is_null() {
+                    LocalFree(sd);
+                    LocalFree(sid_ptr);
+                    return Err("HeapAlloc for new ACL failed".into());
+                }
+
+                // ACL_REVISION = 2
+                if InitializeAcl(new_acl, new_acl_size, 2) == 0 {
+                    HeapFree(GetProcessHeap(), 0, new_acl);
+                    LocalFree(sd);
+                    LocalFree(sid_ptr);
+                    return Err(format!("InitializeAcl failed: {}", io::Error::last_os_error()));
+                }
+
+                // 6. Copy existing ACEs to new ACL
+                if !existing_dacl.is_null() {
+                    for i in 0..acl_info.AceCount {
+                        let mut ace_ptr: *mut c_void = ptr::null_mut();
+                        if GetAce(existing_dacl, i, &mut ace_ptr) != 0 {
+                            let header = &*(ace_ptr as *const AceHeader);
+                            AddAce(new_acl, 2, 0xFFFFFFFF, ace_ptr, header.AceSize as u32);
+                        }
+                    }
+                }
+
+                // 7. Build and add new ACCESS_ALLOWED_ACE (non-inheriting)
+                let ace_buf_size = ace_size as usize;
+                let ace_buf = HeapAlloc(GetProcessHeap(), 0, ace_buf_size);
+                if ace_buf.is_null() {
+                    HeapFree(GetProcessHeap(), 0, new_acl);
+                    LocalFree(sd);
+                    LocalFree(sid_ptr);
+                    return Err("HeapAlloc for ACE failed".into());
+                }
+                std::ptr::write_bytes(ace_buf as *mut u8, 0, ace_buf_size);
+
+                let ace = &mut *(ace_buf as *mut AccessAllowedAce);
+                ace.Header.AceType = ACCESS_ALLOWED_ACE_TYPE;
+                ace.Header.AceFlags = 0; // NO inheritance — this is the key!
+                ace.Header.AceSize = ace_size;
+                ace.Mask = DIR_TRAVERSE_MASK;
+
+                // Copy SID into the ACE (starts at SidStart field)
+                let sid_dest = &mut ace.SidStart as *mut u32 as *mut c_void;
+                CopySid(sid_len, sid_dest, sid_ptr);
+
+                // Add the new ACE
+                AddAce(new_acl, 2, 0xFFFFFFFF, ace_buf, ace_size as u32);
+
+                // 8. Apply the new DACL (UNPROTECTED preserves inherited ACEs)
+                let mut path_wide_mut = path_wide;
+                let result = SetNamedSecurityInfoW(
+                    path_wide_mut.as_mut_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                    ptr::null(), ptr::null(),
+                    new_acl,
+                    ptr::null(),
+                );
+
+                // Cleanup
+                HeapFree(GetProcessHeap(), 0, ace_buf);
+                HeapFree(GetProcessHeap(), 0, new_acl);
+                LocalFree(sd);
+                LocalFree(sid_ptr);
+
+                if result != 0 {
+                    Err(format!("SetNamedSecurityInfoW failed: error {}", result))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
         /// Grant the AppContainer SID access to a path.
         ///
         /// `write` controls whether write access is granted (true) or read-only (false).
         pub fn grant_access(&mut self, path: &Path, write: bool) -> Result<(), String> {
             let path_str = path.display().to_string();
             let perms = if write { "(OI)(CI)(F)" } else { "(OI)(CI)(RX)" };
+            let grant_arg = format!("*{}:{}", self.sid_string, perms);
+
+            // Debug: log the exact icacls command
+            {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("sandbox_debug.log") {
+                    let _ = writeln!(f, "  icacls \"{}\" /grant \"{}\" /T", path_str, grant_arg);
+                }
+            }
 
             let output = std::process::Command::new("icacls")
                 .args([
                     &path_str,
                     "/grant",
-                    &format!("*{}:{}", self.sid_string, perms),
+                    &grant_arg,
+                    "/T",  // Propagate to existing files (OI/CI only affects new objects)
                 ])
                 .output()
                 .map_err(|e| format!("failed to run icacls: {e}"))?;
 
+            // Debug: log icacls result
+            {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("sandbox_debug.log") {
+                    let _ = writeln!(f, "  icacls exit={} stdout={:?} stderr={:?}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout).trim(),
+                        String::from_utf8_lossy(&output.stderr).trim(),
+                    );
+                }
+            }
+
             if output.status.success() {
                 tracing::debug!(path = %path_str, write, "Granted AppContainer access");
                 self.granted_paths.push(path_str);
-                Ok(())
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(format!("icacls grant failed for '{}': {}", path_str, stderr.trim()))
+                return Err(format!("icacls grant failed for '{}': {}", path_str, stderr.trim()));
             }
+
+            // NOTE: We do NOT grant traverse access on ancestor directories.
+            // Windows AppContainers have SeChangeNotifyPrivilege (BYPASS_TRAVERSE_CHECKING)
+            // enabled by default, so they can access files by full path without needing
+            // read ACEs on every parent directory in the chain.
+
+            Ok(())
         }
 
         /// Revoke all previously granted ACEs.

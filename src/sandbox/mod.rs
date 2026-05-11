@@ -113,14 +113,15 @@ impl SandboxProfile {
             }
         }
 
-        // Always grant read access to common system paths for DLL loading.
+        // Windows system paths (System32, SysWOW64) are NOT added to
+        // read_paths because they already have ACLs granting access to
+        // ALL APPLICATION PACKAGES.  Trying to icacls them fails without
+        // admin privileges.  They're only needed for Linux Landlock which
+        // has no equivalent built-in grant.
         #[cfg(windows)]
         {
-            if let Ok(sys) = std::env::var("SYSTEMROOT") {
-                profile.read_paths.push(PathBuf::from(format!("{sys}\\System32")));
-                profile.read_paths.push(PathBuf::from(format!("{sys}\\SysWOW64")));
-            }
-            // The executable itself needs to be readable.
+            // COMSPEC is tracked for reference but AppContainers can
+            // already execute it via the ALL APPLICATION PACKAGES ACE.
             if let Ok(path) = std::env::var("COMSPEC") {
                 profile.exec_paths.push(PathBuf::from(path));
             }
@@ -151,6 +152,21 @@ impl SandboxProfile {
     }
 }
 
+/// Strip glob suffixes (`/**`, `\**`, `/*`, `\*`) from a path string.
+///
+/// On Windows, `PathBuf` normalizes forward slashes to backslashes, so
+/// a config path like `E:/pansof/**` becomes `E:\pansof\**` after
+/// `PathBuf::from().display()`. This function handles both conventions.
+pub fn strip_glob_suffix(path: &str) -> String {
+    // Try longest suffixes first.
+    for suffix in &["/**", "\\**", "/*", "\\*"] {
+        if let Some(stripped) = path.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    path.to_string()
+}
+
 /// Set the integrity label on a path to Low, allowing Low Integrity processes to write.
 ///
 /// Uses `icacls <path> /setintegritylevel (OI)(CI)L`.
@@ -179,7 +195,7 @@ pub fn set_low_integrity_label(path: &std::path::Path) -> Result<(), String> {
 #[cfg(windows)]
 pub fn prepare_write_paths(profile: &SandboxProfile) {
     for path in &profile.write_paths {
-        let clean = path.display().to_string().trim_end_matches("/**").to_string();
+        let clean = strip_glob_suffix(&path.display().to_string());
         let clean_path = std::path::Path::new(&clean);
 
         if clean_path.exists() {
