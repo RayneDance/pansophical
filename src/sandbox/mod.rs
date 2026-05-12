@@ -62,6 +62,10 @@ pub struct SandboxProfile {
     pub write_paths: Vec<PathBuf>,
     /// Paths the child is allowed to execute.
     pub exec_paths: Vec<PathBuf>,
+    /// Whether the child is allowed outbound network access.
+    /// On Windows, this adds the `internetClient` capability to the AppContainer.
+    /// On Linux, this skips the Landlock TCP deny rules.
+    pub allow_network: bool,
     /// Whether the sandbox is enabled.
     #[allow(dead_code)]
     pub enabled: bool,
@@ -74,6 +78,7 @@ impl SandboxProfile {
             read_paths: Vec::new(),
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            allow_network: false,
             enabled: true,
         }
     }
@@ -98,18 +103,24 @@ impl SandboxProfile {
             if rule.effect != Effect::Grant {
                 continue;
             }
-            if rule.target_type != PolicyTargetType::Filesystem {
-                continue;
-            }
 
-            if let Some(ref path) = rule.path {
-                let perm = rule.perm.unwrap_or(Perm::READ);
+            match rule.target_type {
+                PolicyTargetType::Filesystem => {
+                    if let Some(ref path) = rule.path {
+                        let perm = rule.perm.unwrap_or(Perm::READ);
 
-                if perm.contains(Perm::WRITE) {
-                    profile.write_paths.push(PathBuf::from(path));
-                } else {
-                    profile.read_paths.push(PathBuf::from(path));
+                        if perm.contains(Perm::WRITE) {
+                            profile.write_paths.push(PathBuf::from(path));
+                        } else {
+                            profile.read_paths.push(PathBuf::from(path));
+                        }
+                    }
                 }
+                PolicyTargetType::Network => {
+                    // Any network grant enables the internetClient capability.
+                    profile.allow_network = true;
+                }
+                _ => {}
             }
         }
 

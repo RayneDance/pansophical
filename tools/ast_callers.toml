@@ -1,0 +1,35 @@
+# ══════════════════════════════════════════════════════════════════
+# AST Outline — Find Callers
+# ══════════════════════════════════════════════════════════════════
+# AST-accurate reverse call graph: finds all call sites of a symbol
+# across the codebase. No grep false positives — it understands the
+# AST, so overloaded names, comments, and string literals are ignored.
+#
+# Symbol forms accepted:
+#   TakeDamage                     → bare name (suffix match)
+#   Player.TakeDamage              → dotted (class.method)
+#   src/Player.cs:TakeDamage       → file-scoped
+#
+# For a type name, returns implementors/constructions instead of call sites.
+
+name            = "ast_callers"
+description     = "Find all callers of a symbol across the codebase — AST-accurate, no grep false positives. Accepts bare names (TakeDamage), dotted names (Player.TakeDamage), or file-scoped names (src/Player.cs:TakeDamage). For functions/methods, returns call sites. For types, returns implementors and constructions. Each result includes confidence tags (Exact, Inferred, Ambiguous). Requires a directory path to search within."
+command         = "ast-outline"
+args            = ["callers", "{symbol}", "{path}"]
+allow_shell     = false
+arg_passthrough = false
+
+[[parameters]]
+name        = "symbol"
+description = "Symbol to find callers of. Examples: 'TakeDamage', 'Player.TakeDamage', 'src/player.rs:handle_input'."
+required    = true
+
+[[parameters]]
+name        = "path"
+description = "Absolute path to the directory to search within."
+required    = true
+
+[[resources]]
+type = "filesystem"
+path_from_arg = "path"
+perm = "r"

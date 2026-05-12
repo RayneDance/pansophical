@@ -1,0 +1,36 @@
+# ══════════════════════════════════════════════════════════════════
+# AST Outline — Show Symbol Source
+# ══════════════════════════════════════════════════════════════════
+# Extracts and prints the full source code of a specific symbol
+# (function, method, class, struct, etc.) from a file.
+#
+# Use this AFTER `ast_map` to drill into a specific symbol's
+# implementation. Much cheaper than reading the entire file when
+# you only need one function body.
+#
+# Usage examples the agent should follow:
+#   ast-outline show Player.cs TakeDamage     → full method body
+#   ast-outline show src/auth.rs authenticate → specific function
+#   ast-outline show login.py LoginHandler    → class definition
+
+name            = "ast_show"
+description     = "Extract and print the full source code of a specific named symbol (function, method, class, struct, trait, etc.) from a source file. Use after ast_map to drill into a symbol you've identified. Provide the file path and the symbol name. Much cheaper than reading the entire file when you only need one function body."
+command         = "ast-outline"
+args            = ["show", "{path}", "{symbol}"]
+allow_shell     = false
+arg_passthrough = false
+
+[[parameters]]
+name        = "path"
+description = "Absolute path to the source file containing the symbol."
+required    = true
+
+[[parameters]]
+name        = "symbol"
+description = "Name of the symbol to extract (function, method, class, struct, etc.). Use the name as shown in ast_map output."
+required    = true
+
+[[resources]]
+type = "filesystem"
+path_from_arg = "path"
+perm = "r"

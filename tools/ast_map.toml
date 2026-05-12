@@ -1,0 +1,35 @@
+# ══════════════════════════════════════════════════════════════════
+# AST Outline — Map File Structure
+# ══════════════════════════════════════════════════════════════════
+# Returns the structural outline of a source file or directory:
+# function/method/class signatures with line ranges, no method bodies.
+# Typically saves ~95% of tokens vs reading the full file.
+#
+# Supports 14 languages: Rust, Python, TypeScript/JavaScript, Java,
+# C#, C++, Go, Kotlin, Scala, PHP, Ruby, SQL, Markdown.
+#
+# Usage examples the agent should follow:
+#   ast-outline map src/auth/login.rs         → outline of one file
+#   ast-outline map src/                      → outlines of all files in dir
+#   ast-outline map src/ --json               → machine-readable JSON output
+#
+# Returns: signatures, struct/class/enum/trait declarations, function
+# signatures, impl blocks, constants — each with line numbers.
+# Method bodies are omitted. Use `show` to retrieve a specific symbol body.
+
+name            = "ast_map"
+description     = "Map the structural outline of source files. Returns function/method/class/struct signatures with line numbers but no method bodies — typically 95% fewer tokens than reading the file. Pass a single file path to outline one file, or a directory path to outline all supported source files recursively. Supports Rust, Python, TypeScript, JavaScript, Java, C#, C++, Go, Kotlin, Scala, PHP, Ruby, SQL, and Markdown. Add --json for machine-readable output."
+command         = "ast-outline"
+args            = ["map", "{path}"]
+allow_shell     = false
+arg_passthrough = false
+
+[[parameters]]
+name        = "path"
+description = "Absolute path to a source file or directory to outline."
+required    = true
+
+[[resources]]
+type = "filesystem"
+path_from_arg = "path"
+perm = "r"

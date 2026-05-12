@@ -1,0 +1,28 @@
+# ══════════════════════════════════════════════════════════════════
+# AST Outline — Semantic Search
+# ══════════════════════════════════════════════════════════════════
+# Hybrid BM25 + dense semantic search across the codebase.
+# Understands natural language queries like "how does login work"
+# and code queries like "HandlerStack". Builds an index on first call.
+
+name            = "ast_search"
+description     = "Hybrid BM25 + dense semantic search over the codebase. Accepts natural language queries ('how does authentication work') and code queries ('HandlerStack'). Returns ranked code chunks with file paths and line numbers. The search index is built automatically on first use and cached. Pass -k N to control result count (default 10)."
+command         = "ast-outline"
+args            = ["search", "{query}", "{path}"]
+allow_shell     = false
+arg_passthrough = false
+
+[[parameters]]
+name        = "query"
+description = "Search query — natural language or code identifier. Examples: 'how does login work', 'error handling middleware', 'AuthService'."
+required    = true
+
+[[parameters]]
+name        = "path"
+description = "Absolute path to the directory to search within."
+required    = true
+
+[[resources]]
+type = "filesystem"
+path_from_arg = "path"
+perm = "r"

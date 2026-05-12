@@ -48,6 +48,16 @@ impl AccessRequest {
         }
     }
 
+    /// Convenience: create a network access request.
+    pub fn network(host: impl Into<String>) -> Self {
+        Self {
+            target_type: PolicyTargetType::Network,
+            resource: host.into(),
+            perm: Perm::READ, // Network access is binary — granted or denied.
+            groups: Vec::new(),
+        }
+    }
+
     /// Convenience: create a tool meta-authorization request (no groups).
     #[allow(dead_code)]
     pub fn tool(name: impl Into<String>) -> Self {

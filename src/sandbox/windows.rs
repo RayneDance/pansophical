@@ -1085,18 +1085,22 @@ pub mod appcontainer {
     /// The AppContainer denies all access by default. Before calling this,
     /// use `container.grant_access()` to allow paths the child needs.
     ///
+    /// If `allow_network` is true, the `internetClient` capability is added,
+    /// enabling outbound network connections (HTTP, DNS, etc.).
+    ///
     /// Returns the process info and raw pipe handles for stdout/stderr.
     pub fn spawn_in_appcontainer(
         container: &AppContainer,
         cmd_line: &str,
         env_block: &[u16],
+        allow_network: bool,
     ) -> io::Result<(ProcessInformation, RawHandle, RawHandle)> {
         unsafe {
             // ── Create pipes for stdout/stderr ──────────────────────────
             let sa = SecurityAttributes {
                 length: std::mem::size_of::<SecurityAttributes>() as u32,
                 security_descriptor: ptr::null_mut(),
-                inherit_handle: 1, // TRUE
+                inherit_handle: 1,
             };
 
             let mut stdout_read: RawHandle = ptr::null_mut();
@@ -1116,10 +1120,42 @@ pub mod appcontainer {
             SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
 
             // ── Build SECURITY_CAPABILITIES ─────────────────────────────
+
+            // SID_AND_ATTRIBUTES for capability list.
+            #[repr(C)]
+            struct SidAndAttributes {
+                sid: *mut c_void,
+                attributes: u32,
+            }
+            const SE_GROUP_ENABLED: u32 = 0x00000004;
+
+            // If network is allowed, add the internetClient capability.
+            // internetClient = well-known SID S-1-15-3-1
+            let mut cap_sid: *mut c_void = ptr::null_mut();
+            let mut cap_list: Vec<SidAndAttributes> = Vec::new();
+
+            if allow_network {
+                let sid_str = "S-1-15-3-1";
+                let sid_wide: Vec<u16> = sid_str.encode_utf16().chain(std::iter::once(0)).collect();
+                if ConvertStringSidToSidW(sid_wide.as_ptr(), &mut cap_sid) != 0 {
+                    cap_list.push(SidAndAttributes {
+                        sid: cap_sid,
+                        attributes: SE_GROUP_ENABLED,
+                    });
+                    tracing::debug!("AppContainer: added internetClient capability");
+                } else {
+                    tracing::warn!("Failed to create internetClient SID — network will be denied");
+                }
+            }
+
             let sc = SecurityCapabilities {
                 AppContainerSid: container.sid,
-                Capabilities: ptr::null_mut(),
-                CapabilityCount: 0,
+                Capabilities: if cap_list.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    cap_list.as_mut_ptr() as *mut c_void
+                },
+                CapabilityCount: cap_list.len() as u32,
                 Reserved: 0,
             };
 

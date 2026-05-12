@@ -1,0 +1,19 @@
+# ══════════════════════════════════════════════════════════════════
+# Fetch News Headlines
+# ══════════════════════════════════════════════════════════════════
+# Fetches the Google News RSS feed and returns the raw XML.
+# The AI agent can then parse and summarize the headlines.
+#
+# Requires a network grant in the key's policy rules.
+
+name            = "fetch_news"
+description     = "Fetch the latest Google News headlines (RSS feed). Returns XML that can be parsed for headline titles, links, and publication dates."
+command         = "curl"
+args            = ["-s", "-L", "--max-time", "10", "https://news.google.com/rss"]
+allow_shell     = false
+arg_passthrough = false
+
+[[resources]]
+type = "network"
+path = "*"
+perm = "r"

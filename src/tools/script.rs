@@ -289,40 +289,49 @@ impl McpTool for ScriptTool {
                 res.path.clone()
             };
 
-            if let Some(path) = path {
-                // Parse perm string.
-                let perm = Perm::from_short(&res.perm).unwrap_or(Perm::READ);
+            match res.resource_type.as_str() {
+                "network" => {
+                    // Network access: host from path field, or "*" for any.
+                    let host = path.unwrap_or_else(|| "*".to_string());
+                    requests.push(AccessRequest::network(host));
+                }
+                _ if path.is_some() => {
+                    let path = path.unwrap();
+                    // Parse perm string.
+                    let perm = Perm::from_short(&res.perm).unwrap_or(Perm::READ);
 
-                match res.resource_type.as_str() {
-                    "filesystem" => {
-                        // Canonicalize the path.
-                        match crate::authz::glob::canonical_path(std::path::Path::new(&path)) {
-                            Ok(canonical) => {
-                                requests.push(AccessRequest::filesystem(
-                                    canonical.to_string_lossy().to_string(),
-                                    perm,
-                                ));
-                            }
-                            Err(_) => {
-                                // For create operations, try canonical_path_for_create.
-                                if perm.contains(Perm::WRITE) {
-                                    if let Ok(canonical) = crate::authz::glob::canonical_path_for_create(
-                                        std::path::Path::new(&path),
-                                    ) {
-                                        requests.push(AccessRequest::filesystem(
-                                            canonical.to_string_lossy().to_string(),
-                                            perm,
-                                        ));
+                    match res.resource_type.as_str() {
+                        "filesystem" => {
+                            // Canonicalize the path.
+                            match crate::authz::glob::canonical_path(std::path::Path::new(&path)) {
+                                Ok(canonical) => {
+                                    requests.push(AccessRequest::filesystem(
+                                        canonical.to_string_lossy().to_string(),
+                                        perm,
+                                    ));
+                                }
+                                Err(_) => {
+                                    // For create operations, try canonical_path_for_create.
+                                    if perm.contains(Perm::WRITE) {
+                                        if let Ok(canonical) = crate::authz::glob::canonical_path_for_create(
+                                            std::path::Path::new(&path),
+                                        ) {
+                                            requests.push(AccessRequest::filesystem(
+                                                canonical.to_string_lossy().to_string(),
+                                                perm,
+                                            ));
+                                        }
                                     }
                                 }
                             }
                         }
+                        "program" => {
+                            requests.push(AccessRequest::program(&path, perm));
+                        }
+                        _ => {}
                     }
-                    "program" => {
-                        requests.push(AccessRequest::program(&path, perm));
-                    }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 

@@ -1,0 +1,27 @@
+# ══════════════════════════════════════════════════════════════════
+# AST Outline — Find Callees
+# ══════════════════════════════════════════════════════════════════
+# AST-accurate forward call graph: finds everything a symbol calls.
+# Use to understand a function's dependencies before refactoring.
+
+name            = "ast_callees"
+description     = "Find everything a symbol calls — AST-accurate forward call traversal. Shows all functions, methods, and constructors invoked by the given symbol. Use to understand dependencies before refactoring. Accepts bare names, dotted names, or file-scoped names."
+command         = "ast-outline"
+args            = ["callees", "{symbol}", "{path}"]
+allow_shell     = false
+arg_passthrough = false
+
+[[parameters]]
+name        = "symbol"
+description = "Symbol to find callees of. Examples: 'handle_request', 'Server.start', 'src/main.rs:main'."
+required    = true
+
+[[parameters]]
+name        = "path"
+description = "Absolute path to the directory to search within."
+required    = true
+
+[[resources]]
+type = "filesystem"
+path_from_arg = "path"
+perm = "r"

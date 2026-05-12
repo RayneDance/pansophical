@@ -1,0 +1,28 @@
+# ══════════════════════════════════════════════════════════════════
+# AST Outline — Find Implementations
+# ══════════════════════════════════════════════════════════════════
+# Finds all classes/structs that implement or inherit from a given
+# type. AST-accurate — no grep false positives from comments or
+# string literals.
+
+name            = "ast_implements"
+description     = "Find all classes, structs, or types that implement or inherit from a given interface, trait, or base class. AST-accurate — no false positives from comments, strings, or identically-named variables. Searches recursively through all supported source files in the given directory."
+command         = "ast-outline"
+args            = ["implements", "{type_name}", "{path}"]
+allow_shell     = false
+arg_passthrough = false
+
+[[parameters]]
+name        = "type_name"
+description = "Name of the interface, trait, abstract class, or base type to find implementations of. Example: 'IDamageable', 'Iterator', 'McpTool'."
+required    = true
+
+[[parameters]]
+name        = "path"
+description = "Absolute path to the directory to search within."
+required    = true
+
+[[resources]]
+type = "filesystem"
+path_from_arg = "path"
+perm = "r"
