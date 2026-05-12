@@ -504,9 +504,9 @@ def main():
                     new_stderr = mcp._stderr_lines[stderr_before:]
                     if new_stderr:
                         cprint(C.DIM, f"  📋 Server logs ({len(new_stderr)} lines):")
-                        for log_line in new_stderr[-15:]:
+                        for log_line in new_stderr[-30:]:
                             # Truncate long lines.
-                            display = log_line[:140] + "..." if len(log_line) > 140 else log_line
+                            display = log_line[:250] + "..." if len(log_line) > 250 else log_line
                             cprint(C.DIM, f"     {display}")
 
                     if "error" in result:
