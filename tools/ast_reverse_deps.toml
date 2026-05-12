@@ -4,7 +4,8 @@
 # Shows which files import a given file — the "blast radius" of
 # changes. Essential before refactoring to know what would break.
 
-name            = "ast_reverse_deps"
+name            = "reverse_deps"
+group           = "ast"
 description     = "Find all files that import a given file — the blast radius of changes. Essential before refactoring to know what would break. Builds and caches a file-level import graph. Supports Rust, Python, TypeScript/JavaScript, Java, C#, Kotlin, Scala, and Go."
 command         = "ast-outline"
 args            = ["reverse-deps", "{path}"]

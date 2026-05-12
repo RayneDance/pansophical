@@ -5,7 +5,8 @@
 # Understands natural language queries like "how does login work"
 # and code queries like "HandlerStack". Builds an index on first call.
 
-name            = "ast_search"
+name            = "search"
+group           = "ast"
 description     = "Hybrid BM25 + dense semantic search over the codebase. Accepts natural language queries ('how does authentication work') and code queries ('HandlerStack'). Returns ranked code chunks with file paths and line numbers. The search index is built automatically on first use and cached. Pass -k N to control result count (default 10)."
 command         = "ast-outline"
 args            = ["search", "{query}", "{path}"]

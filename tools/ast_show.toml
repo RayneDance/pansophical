@@ -13,7 +13,8 @@
 #   ast-outline show src/auth.rs authenticate → specific function
 #   ast-outline show login.py LoginHandler    → class definition
 
-name            = "ast_show"
+name            = "show"
+group           = "ast"
 description     = "Extract and print the full source code of a specific named symbol (function, method, class, struct, trait, etc.) from a source file. Use after ast_map to drill into a symbol you've identified. Provide the file path and the symbol name. Much cheaper than reading the entire file when you only need one function body."
 command         = "ast-outline"
 args            = ["show", "{path}", "{symbol}"]

@@ -12,7 +12,8 @@
 #
 # For a type name, returns implementors/constructions instead of call sites.
 
-name            = "ast_callers"
+name            = "callers"
+group           = "ast"
 description     = "Find all callers of a symbol across the codebase — AST-accurate, no grep false positives. Accepts bare names (TakeDamage), dotted names (Player.TakeDamage), or file-scoped names (src/Player.cs:TakeDamage). For functions/methods, returns call sites. For types, returns implementors and constructions. Each result includes confidence tags (Exact, Inferred, Ambiguous). Requires a directory path to search within."
 command         = "ast-outline"
 args            = ["callers", "{symbol}", "{path}"]

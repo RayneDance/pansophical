@@ -17,7 +17,8 @@
 # signatures, impl blocks, constants — each with line numbers.
 # Method bodies are omitted. Use `show` to retrieve a specific symbol body.
 
-name            = "ast_map"
+name            = "map"
+group           = "ast"
 description     = "Map the structural outline of source files. Returns function/method/class/struct signatures with line numbers but no method bodies — typically 95% fewer tokens than reading the file. Pass a single file path to outline one file, or a directory path to outline all supported source files recursively. Supports Rust, Python, TypeScript, JavaScript, Java, C#, C++, Go, Kotlin, Scala, PHP, Ruby, SQL, and Markdown. Add --json for machine-readable output."
 command         = "ast-outline"
 args            = ["map", "{path}"]

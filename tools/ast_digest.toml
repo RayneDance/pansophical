@@ -8,7 +8,8 @@
 # into a single scannable overview. Great for understanding the shape
 # of an unfamiliar module before diving into specific files.
 
-name            = "ast_digest"
+name            = "digest"
+group           = "ast"
 description     = "Produce a compact one-page structural map of an entire directory or module. Lists all files with their top-level symbols (functions, classes, structs, traits, etc.) and line ranges. Use this to quickly understand the shape of an unfamiliar module before drilling into specific files with ast_show. Typically ~100 lines for a whole module."
 command         = "ast-outline"
 args            = ["digest", "{path}"]

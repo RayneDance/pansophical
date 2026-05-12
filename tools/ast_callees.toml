@@ -4,7 +4,8 @@
 # AST-accurate forward call graph: finds everything a symbol calls.
 # Use to understand a function's dependencies before refactoring.
 
-name            = "ast_callees"
+name            = "callees"
+group           = "ast"
 description     = "Find everything a symbol calls — AST-accurate forward call traversal. Shows all functions, methods, and constructors invoked by the given symbol. Use to understand dependencies before refactoring. Accepts bare names, dotted names, or file-scoped names."
 command         = "ast-outline"
 args            = ["callees", "{symbol}", "{path}"]

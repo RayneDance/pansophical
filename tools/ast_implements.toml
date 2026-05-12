@@ -5,7 +5,8 @@
 # type. AST-accurate — no grep false positives from comments or
 # string literals.
 
-name            = "ast_implements"
+name            = "implements"
+group           = "ast"
 description     = "Find all classes, structs, or types that implement or inherit from a given interface, trait, or base class. AST-accurate — no false positives from comments, strings, or identically-named variables. Searches recursively through all supported source files in the given directory."
 command         = "ast-outline"
 args            = ["implements", "{type_name}", "{path}"]
