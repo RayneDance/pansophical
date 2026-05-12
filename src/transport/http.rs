@@ -148,12 +148,11 @@ async fn handle_sse(
     let token = extract_bearer(&headers).unwrap_or_default();
 
     // Validate key exists (if keys are configured).
-    if !state.config.keys.is_empty() {
-        if state.config.resolve_key(&token).is_none() {
+    if !state.config.keys.is_empty()
+        && state.config.resolve_key(&token).is_none() {
             state.audit.log_event("http_auth_failed", "invalid bearer token");
             return Err(StatusCode::UNAUTHORIZED);
         }
-    }
 
     // Create a new session.
     let mut session = Session::new();
@@ -470,8 +469,9 @@ async fn handle_tools_call_http(
 
             let sandbox_profile = crate::sandbox::SandboxProfile::from_key_config(key_config);
 
-            crate::sandbox::with_profile(
+            crate::sandbox::with_profile_and_key(
                 sandbox_profile,
+                session.key_name.clone(),
                 execute_tool_http(id, tool, &arguments, config, audit, session, tool_name, &env_grants),
             ).await
         }
@@ -508,6 +508,7 @@ async fn handle_tools_call_http(
 }
 
 /// Execute a tool after authorization (HTTP variant).
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_http(
     id: Value,
     tool: &dyn crate::tools::McpTool,

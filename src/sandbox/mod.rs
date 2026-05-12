@@ -21,6 +21,9 @@ pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(target_os = "windows")]
+pub mod pool;
+
 use std::path::PathBuf;
 
 use crate::config::policy_target::{Effect, PolicyTargetType};
@@ -35,9 +38,19 @@ use crate::config::schema::KeyConfig;
 
 tokio::task_local! {
     static CURRENT_PROFILE: SandboxProfile;
+    static CURRENT_KEY_NAME: String;
+}
+
+/// Run a closure with a sandbox profile and key name set for the current task.
+pub async fn with_profile_and_key<F, R>(profile: SandboxProfile, key_name: String, f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    CURRENT_PROFILE.scope(profile, CURRENT_KEY_NAME.scope(key_name, f)).await
 }
 
 /// Run a closure with a sandbox profile set for the current task.
+#[allow(dead_code)]
 pub async fn with_profile<F, R>(profile: SandboxProfile, f: F) -> R
 where
     F: std::future::Future<Output = R>,
@@ -48,6 +61,11 @@ where
 /// Get the current task's sandbox profile (if set).
 pub fn current_profile() -> Option<SandboxProfile> {
     CURRENT_PROFILE.try_with(|p| p.clone()).ok()
+}
+
+/// Get the current task's key name (if set).
+pub fn current_key_name() -> Option<String> {
+    CURRENT_KEY_NAME.try_with(|k| k.clone()).ok()
 }
 
 /// Filesystem access profile for a sandboxed child process.
@@ -154,12 +172,7 @@ impl SandboxProfile {
     /// Add the tool's command binary to the exec paths.
     #[allow(dead_code)]
     pub fn add_executable(&mut self, program: &str) {
-        let path = PathBuf::from(program);
-        if path.is_absolute() {
-            self.exec_paths.push(path);
-        } else {
-            self.exec_paths.push(path);
-        }
+        self.exec_paths.push(PathBuf::from(program));
     }
 }
 

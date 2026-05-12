@@ -101,7 +101,7 @@ pub fn handle_initialize(
         },
         server_info: ServerInfo {
             name: "pansophical".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::build_version(),
         },
     };
 

@@ -160,7 +160,7 @@ impl ScriptTool {
 
         // Flag injection: reject values starting with `-`.
         let param = self.def.parameters.iter().find(|p| p.name == name);
-        let allow_flags = param.map_or(false, |p| p.allow_flags);
+        let allow_flags = param.is_some_and(|p| p.allow_flags);
 
         if !allow_flags && value.starts_with('-') {
             return Err(format!(
@@ -312,8 +312,8 @@ impl McpTool for ScriptTool {
                                 }
                                 Err(_) => {
                                     // For create operations, try canonical_path_for_create.
-                                    if perm.contains(Perm::WRITE) {
-                                        if let Ok(canonical) = crate::authz::glob::canonical_path_for_create(
+                                    if perm.contains(Perm::WRITE)
+                                        && let Ok(canonical) = crate::authz::glob::canonical_path_for_create(
                                             std::path::Path::new(&path),
                                         ) {
                                             requests.push(AccessRequest::filesystem(
@@ -321,7 +321,6 @@ impl McpTool for ScriptTool {
                                                 perm,
                                             ));
                                         }
-                                    }
                                 }
                             }
                         }

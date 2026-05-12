@@ -13,7 +13,7 @@ mod session;
 mod error;
 
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, error};
 
 use crate::error::{PansophicalError, Result};
@@ -63,7 +63,7 @@ fn main() {
 }
 
 /// `--init`: Generate a well-commented config.toml with a random server_secret.
-fn run_init(path: &PathBuf) -> Result<()> {
+fn run_init(path: &Path) -> Result<()> {
     use base64::Engine;
     use rand::RngCore;
 
@@ -185,7 +185,7 @@ allow_shell = true
 
 
 /// `--check`: Parse and validate the config file with full schema validation.
-fn run_check(path: &PathBuf) -> Result<()> {
+fn run_check(path: &Path) -> Result<()> {
     if !path.exists() {
         return Err(PansophicalError::ConfigNotFound {
             path: path.display().to_string(),
@@ -202,7 +202,7 @@ fn run_check(path: &PathBuf) -> Result<()> {
 }
 
 /// Default server mode: load config and run the transport loop.
-fn run_server(path: &PathBuf) -> Result<()> {
+fn run_server(path: &Path) -> Result<()> {
     use std::sync::Arc;
 
     if !path.exists() {
@@ -213,7 +213,8 @@ fn run_server(path: &PathBuf) -> Result<()> {
 
     let config = config::schema::Config::load(path)?;
 
-    info!("Pansophical v{}", env!("CARGO_PKG_VERSION"));
+    let version = build_version();
+    info!("{version}");
     info!("Config: {}", path.display());
     info!("Transport: {}", config.server.transport);
 
@@ -223,8 +224,7 @@ fn run_server(path: &PathBuf) -> Result<()> {
     // Create the audit log.
     let audit = Arc::new(audit::AuditLog::new(&config.audit));
     audit.log_event("startup", &format!(
-        "Pansophical v{} starting, transport={}",
-        env!("CARGO_PKG_VERSION"),
+        "{version}, transport={}",
         config.server.transport,
     ));
 
@@ -268,6 +268,15 @@ fn run_server(path: &PathBuf) -> Result<()> {
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| PansophicalError::Other(format!("failed to create runtime: {e}")))?;
             rt.block_on(async {
+                // Initialize AppContainer pool (Windows only).
+                #[cfg(windows)]
+                {
+                    let config_dir = path.parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    reaper::init_container_pool(&config.sandbox, config_dir).await;
+                }
+
                 // Start the confirm server as a background task.
                 let confirm_port = config.ui.port;
                 let confirm_state_bg = Arc::clone(&confirm_state);
@@ -288,7 +297,7 @@ fn run_server(path: &PathBuf) -> Result<()> {
                 });
 
                 // Start config hot-reload watcher.
-                let watcher_path = path.clone();
+                let watcher_path = path.to_path_buf();
                 let watcher_cache = Arc::clone(&approval_cache);
                 let watcher_audit = Arc::clone(&audit);
                 let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
@@ -305,12 +314,25 @@ fn run_server(path: &PathBuf) -> Result<()> {
 
                 // Run the stdio transport.
                 transport::stdio::run(config, audit, confirm_state).await;
+
+                // Cleanup AppContainer pool on shutdown.
+                #[cfg(windows)]
+                reaper::cleanup_container_pool().await;
             });
         }
         "http" => {
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| PansophicalError::Other(format!("failed to create runtime: {e}")))?;
             rt.block_on(async {
+                // Initialize AppContainer pool (Windows only).
+                #[cfg(windows)]
+                {
+                    let config_dir = path.parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    reaper::init_container_pool(&config.sandbox, config_dir).await;
+                }
+
                 // Start the confirm server.
                 let confirm_port = config.ui.port;
                 let confirm_state_bg = Arc::clone(&confirm_state);
@@ -331,7 +353,7 @@ fn run_server(path: &PathBuf) -> Result<()> {
                 });
 
                 // Start config hot-reload watcher.
-                let watcher_path = path.clone();
+                let watcher_path = path.to_path_buf();
                 let watcher_cache = Arc::clone(&approval_cache);
                 let watcher_audit = Arc::clone(&audit);
                 let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
@@ -348,6 +370,10 @@ fn run_server(path: &PathBuf) -> Result<()> {
 
                 // Run the HTTP transport (blocks).
                 transport::http::run(config, audit, confirm_state).await;
+
+                // Cleanup AppContainer pool on shutdown.
+                #[cfg(windows)]
+                reaper::cleanup_container_pool().await;
             });
         }
         "both" => {
@@ -374,7 +400,7 @@ fn run_server(path: &PathBuf) -> Result<()> {
                 });
 
                 // Start config hot-reload watcher.
-                let watcher_path = path.clone();
+                let watcher_path = path.to_path_buf();
                 let watcher_cache = Arc::clone(&approval_cache);
                 let watcher_audit = Arc::clone(&audit);
                 let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
@@ -572,4 +598,22 @@ var_pattern = "HOSTNAME"
 # confirm    = true
 "##
     )
+}
+
+/// Build a canonical version string for logs and protocol responses.
+///
+/// Format: `Pansophical v0.1.0 (abc1234d, 2026-05-12T01:23:45Z)`
+/// If the tree is dirty: `Pansophical v0.1.0 (abc1234d-dirty, ...)`
+pub fn build_version() -> String {
+    let ver = env!("CARGO_PKG_VERSION");
+    let git = env!("PANSOPHICAL_GIT_REF");
+    let ts = env!("PANSOPHICAL_BUILD_TS");
+
+    // Convert Unix timestamp to human-readable UTC.
+    let secs: i64 = ts.parse().unwrap_or(0);
+    let dt = chrono::DateTime::from_timestamp(secs, 0)
+        .map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| ts.to_string());
+
+    format!("Pansophical v{ver} ({git}, {dt})")
 }

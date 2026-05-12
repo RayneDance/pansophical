@@ -120,6 +120,12 @@ pub struct SandboxConfig {
     /// AppContainer denies network by default.
     #[serde(default = "default_true")]
     pub deny_network: bool,
+
+    /// Directories to skip during recursive ACL grants.
+    /// These are matched case-insensitively against directory basenames.
+    /// Defaults to common build/dependency directories (target, node_modules, .git, etc.).
+    #[serde(default = "default_skip_dirs")]
+    pub skip_dirs: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -135,6 +141,7 @@ impl Default for SandboxConfig {
             ],
             allow_fallback: true,
             deny_network: true,
+            skip_dirs: default_skip_dirs(),
         }
     }
 }
@@ -224,16 +231,12 @@ impl Default for UiConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Default)]
 pub struct UiAuthConfig {
     #[serde(default)]
     pub pin: String,
 }
 
-impl Default for UiAuthConfig {
-    fn default() -> Self {
-        Self { pin: String::new() }
-    }
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConfirmConfig {
@@ -321,3 +324,14 @@ fn default_confirm_timeout() -> u64 { 30 }
 fn default_session_options() -> Vec<u64> { vec![5, 30, 0] }
 fn default_inactivity() -> u64 { 300 }
 fn default_preset() -> String { "dark".into() }
+fn default_skip_dirs() -> Vec<String> {
+    vec![
+        "target".into(), "node_modules".into(), ".git".into(),
+        "build".into(), "dist".into(), "out".into(),
+        "__pycache__".into(), ".venv".into(), "venv".into(),
+        ".cache".into(), ".next".into(), ".nuxt".into(),
+        ".turbo".into(), ".parcel-cache".into(), ".gradle".into(),
+        ".tox".into(), ".mypy_cache".into(), ".pytest_cache".into(),
+        ".ruff_cache".into(), ".eggs".into(),
+    ]
+}

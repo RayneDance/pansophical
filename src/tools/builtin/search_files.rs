@@ -171,7 +171,7 @@ fn simple_glob_match(pattern: &str, name: &str) -> bool {
         name.ends_with(&ext)
     } else if pat.ends_with("*") {
         let prefix = &pat[..pat.len() - 1];
-        name.starts_with(&prefix)
+        name.starts_with(prefix)
     } else {
         name == pat
     }

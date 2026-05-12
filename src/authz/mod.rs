@@ -230,9 +230,8 @@ pub fn collect_env_grants(key_config: &KeyConfig) -> Vec<(String, String)> {
             }
         } else {
             // Passthrough — read from parent env.
-            if pattern.ends_with('*') {
+            if let Some(prefix) = pattern.strip_suffix('*') {
                 // Wildcard: match all env vars starting with the prefix.
-                let prefix = &pattern[..pattern.len() - 1];
                 for (key, val) in std::env::vars() {
                     if key.starts_with(prefix) {
                         env_vars.push((key, val));

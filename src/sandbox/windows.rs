@@ -620,6 +620,13 @@ pub mod appcontainer {
         fn DeleteAppContainerProfile(container_name: *const u16) -> i32;
     }
 
+    /// Public safe wrapper for deleting an AppContainer profile by wide name.
+    pub fn delete_profile(name_wide: &[u16]) {
+        unsafe {
+            DeleteAppContainerProfile(name_wide.as_ptr());
+        }
+    }
+
     unsafe extern "system" {
         // SID → string conversion
         fn ConvertSidToStringSidW(
@@ -674,23 +681,87 @@ pub mod appcontainer {
         safe fn CloseHandle(handle: RawHandle) -> i32;
     }
 
-    // ── Win32 Security API for non-inheriting ACEs ──────────────────────────
+    // ── Win32 Security API ────────────────────────────────────────────────────
 
     const SE_FILE_OBJECT: u32 = 1;
     const DACL_SECURITY_INFORMATION: u32 = 0x00000004;
     const UNPROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x20000000;
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    #[allow(dead_code)]
     const GENERIC_READ: u32 = 0x80000000;
+    #[allow(dead_code)]
     const GENERIC_EXECUTE: u32 = 0x20000000;
+    #[allow(dead_code)]
     const FILE_LIST_DIRECTORY: u32 = 0x0001;
+    const FILE_READ_DATA: u32 = 0x0001; // same as FILE_LIST_DIRECTORY for files
     const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_READ_EA: u32 = 0x0008;
+    #[allow(dead_code)]
     const FILE_TRAVERSE: u32 = 0x0020;
+    const FILE_EXECUTE: u32 = 0x0020; // same as FILE_TRAVERSE
     const READ_CONTROL: u32 = 0x00020000;
     const SYNCHRONIZE: u32 = 0x00100000;
+    const FILE_WRITE_DATA: u32 = 0x0002;
+    const FILE_APPEND_DATA: u32 = 0x0004;
+    const FILE_WRITE_EA: u32 = 0x0010;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const DELETE: u32 = 0x00010000;
+    const WRITE_DAC: u32 = 0x00040000;
 
     // Minimal read+traverse access mask for directories
+    #[allow(dead_code)]
     const DIR_TRAVERSE_MASK: u32 =
         FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE;
+
+    // Full read access mask for files and directories
+    const FILE_READ_MASK: u32 =
+        FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES | FILE_EXECUTE | READ_CONTROL | SYNCHRONIZE;
+
+    // Full write access mask
+    const FILE_WRITE_MASK: u32 =
+        FILE_READ_MASK | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC;
+
+    // Handle-based file open constants
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+    const INVALID_HANDLE_VALUE: RawHandle = -1isize as RawHandle;
+    #[allow(dead_code)]
+    const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
+    const MAX_PATH: usize = 260;
+
+    // FindFirstFile/FindNextFile constants
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct Win32FindDataW {
+        dwFileAttributes: u32,
+        ftCreationTime: [u32; 2],
+        ftLastAccessTime: [u32; 2],
+        ftLastWriteTime: [u32; 2],
+        nFileSizeHigh: u32,
+        nFileSizeLow: u32,
+        dwReserved0: u32,
+        dwReserved1: u32,
+        cFileName: [u16; MAX_PATH],
+        cAlternateFileName: [u16; 14],
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct ByHandleFileInformation {
+        dwFileAttributes: u32,
+        ftCreationTime: [u32; 2],
+        ftLastAccessTime: [u32; 2],
+        ftLastWriteTime: [u32; 2],
+        dwVolumeSerialNumber: u32,
+        nFileSizeHigh: u32,
+        nFileSizeLow: u32,
+        nNumberOfLinks: u32,
+        nFileIndexHigh: u32,
+        nFileIndexLow: u32,
+    }
 
     #[repr(C)]
     #[allow(non_snake_case)]
@@ -724,6 +795,7 @@ pub mod appcontainer {
 
         fn GetLengthSid(sid: *const c_void) -> u32;
 
+        #[allow(dead_code)]
         fn GetNamedSecurityInfoW(
             object_name: *const u16,
             object_type: u32,
@@ -733,10 +805,33 @@ pub mod appcontainer {
             dacl: *mut *mut c_void,
             sacl: *mut *mut c_void,
             security_descriptor: *mut *mut c_void,
-        ) -> u32; // returns ERROR_SUCCESS (0) on success
+        ) -> u32;
 
+        #[allow(dead_code)]
         fn SetNamedSecurityInfoW(
             object_name: *mut u16,
+            object_type: u32,
+            security_info: u32,
+            owner: *const c_void,
+            group: *const c_void,
+            dacl: *const c_void,
+            sacl: *const c_void,
+        ) -> u32;
+
+        // Handle-based security API (TOCTOU-safe)
+        fn GetSecurityInfo(
+            handle: RawHandle,
+            object_type: u32,
+            security_info: u32,
+            owner: *mut *mut c_void,
+            group: *mut *mut c_void,
+            dacl: *mut *mut c_void,
+            sacl: *mut *mut c_void,
+            security_descriptor: *mut *mut c_void,
+        ) -> u32;
+
+        fn SetSecurityInfo(
+            handle: RawHandle,
             object_type: u32,
             security_info: u32,
             owner: *const c_void,
@@ -777,6 +872,37 @@ pub mod appcontainer {
             dest: *mut c_void,
             source: *const c_void,
         ) -> i32;
+
+        // File handle operations
+        fn CreateFileW(
+            file_name: *const u16,
+            desired_access: u32,
+            share_mode: u32,
+            security_attributes: *const c_void,
+            creation_disposition: u32,
+            flags_and_attributes: u32,
+            template_file: RawHandle,
+        ) -> RawHandle;
+
+        fn FindFirstFileW(
+            file_name: *const u16,
+            find_data: *mut Win32FindDataW,
+        ) -> RawHandle;
+
+        fn FindNextFileW(
+            find_handle: RawHandle,
+            find_data: *mut Win32FindDataW,
+        ) -> i32;
+
+        fn FindClose(find_handle: RawHandle) -> i32;
+
+        fn GetFileInformationByHandle(
+            file: RawHandle,
+            file_info: *mut ByHandleFileInformation,
+        ) -> i32;
+
+        #[allow(dead_code)]
+        fn GetFileAttributesW(file_name: *const u16) -> u32;
     }
 
     // ── AppContainer lifecycle ───────────────────────────────────────────────
@@ -792,13 +918,23 @@ pub mod appcontainer {
     // SAFETY: AppContainer is only used on the creating thread before spawn.
     // The SID pointer is a kernel-managed object safe to move between threads.
     unsafe impl Send for AppContainer {}
+    unsafe impl Sync for AppContainer {}
 
     impl AppContainer {
-        /// Create a new AppContainer profile with a unique name.
+        /// Create a new AppContainer profile with a unique (UUID) name.
+        #[allow(dead_code)]
         pub fn create() -> io::Result<Self> {
             let uuid = uuid::Uuid::new_v4();
-            let name = format!("pansophical-{}", uuid);
-            let display = format!("Pansophical Sandbox {}", uuid);
+            Self::create_named(&format!("pansophical-{}", uuid))
+        }
+
+        /// Create a new AppContainer profile with a deterministic name.
+        ///
+        /// Deterministic names (e.g. `pansophical-coding_agent-a1b2c3`) enable
+        /// orphan cleanup on restart — we can find and delete profiles from
+        /// prior crashes by pattern matching the name.
+        pub fn create_named(name: &str) -> io::Result<Self> {
+            let display = format!("Pansophical Sandbox {}", name);
             let desc = "Pansophical MCP server sandboxed child";
 
             let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -808,7 +944,7 @@ pub mod appcontainer {
             let mut sid: *mut c_void = ptr::null_mut();
 
             unsafe {
-                // Delete any orphaned profile with the same name (shouldn't happen with UUID).
+                // Delete any orphaned profile with the same name.
                 let _ = DeleteAppContainerProfile(name_wide.as_ptr());
 
                 let hr = CreateAppContainerProfile(
@@ -821,14 +957,12 @@ pub mod appcontainer {
                 );
 
                 if hr != S_OK {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
+                    return Err(io::Error::other(
                         format!("CreateAppContainerProfile failed: HRESULT 0x{:08X}", hr as u32),
                     ));
                 }
             }
 
-            // Convert SID to string for icacls.
             let sid_string = sid_to_string(sid)?;
 
             tracing::info!(
@@ -845,6 +979,11 @@ pub mod appcontainer {
             })
         }
 
+        /// Track a path that was granted access (for cleanup).
+        pub fn track_granted_path(&mut self, path: String) {
+            self.granted_paths.push(path);
+        }
+
         /// Grant traverse-only (read, non-inheriting) access on a single directory.
         ///
         /// This uses Win32 `SetNamedSecurityInfoW` directly instead of `icacls`
@@ -853,6 +992,7 @@ pub mod appcontainer {
         ///
         /// The ACE has `AceFlags = 0` (no OI/CI), so it applies ONLY to the
         /// directory object itself, not to anything inside it.
+        #[allow(dead_code)]
         fn grant_traverse_only(sid_string: &str, path: &str) -> Result<(), String> {
             unsafe {
                 // 1. Convert SID string → binary SID
@@ -974,70 +1114,14 @@ pub mod appcontainer {
             }
         }
 
-        /// Grant the AppContainer SID access to a path.
-        ///
-        /// `write` controls whether write access is granted (true) or read-only (false).
-        pub fn grant_access(&mut self, path: &Path, write: bool) -> Result<(), String> {
-            let path_str = path.display().to_string();
-            let perms = if write { "(OI)(CI)(F)" } else { "(OI)(CI)(RX)" };
-            let grant_arg = format!("*{}:{}", self.sid_string, perms);
-
-            // Debug: log the exact icacls command
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("sandbox_debug.log") {
-                    let _ = writeln!(f, "  icacls \"{}\" /grant \"{}\" /T", path_str, grant_arg);
-                }
-            }
-
-            let output = std::process::Command::new("icacls")
-                .args([
-                    &path_str,
-                    "/grant",
-                    &grant_arg,
-                    "/T",  // Propagate to existing files (OI/CI only affects new objects)
-                ])
-                .output()
-                .map_err(|e| format!("failed to run icacls: {e}"))?;
-
-            // Debug: log icacls result
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("sandbox_debug.log") {
-                    let _ = writeln!(f, "  icacls exit={} stdout={:?} stderr={:?}",
-                        output.status,
-                        String::from_utf8_lossy(&output.stdout).trim(),
-                        String::from_utf8_lossy(&output.stderr).trim(),
-                    );
-                }
-            }
-
-            if output.status.success() {
-                tracing::debug!(path = %path_str, write, "Granted AppContainer access");
-                self.granted_paths.push(path_str);
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("icacls grant failed for '{}': {}", path_str, stderr.trim()));
-            }
-
-            // NOTE: We do NOT grant traverse access on ancestor directories.
-            // Windows AppContainers have SeChangeNotifyPrivilege (BYPASS_TRAVERSE_CHECKING)
-            // enabled by default, so they can access files by full path without needing
-            // read ACEs on every parent directory in the chain.
-
-            Ok(())
-        }
-
-        /// Revoke all previously granted ACEs.
+        /// Revoke all previously granted ACEs using the native recursive walker.
         fn revoke_all(&self) {
             for path_str in &self.granted_paths {
-                let _ = std::process::Command::new("icacls")
-                    .args([
-                        path_str.as_str(),
-                        "/remove",
-                        &format!("*{}", self.sid_string),
-                    ])
-                    .output();
+                let path = std::path::Path::new(path_str);
+                if path.exists()
+                    && let Err(e) = revoke_recursive(path, &self.sid_string) {
+                        tracing::warn!(path = %path_str, error = %e, "Failed to revoke ACEs");
+                    }
             }
         }
     }
@@ -1056,6 +1140,502 @@ pub mod appcontainer {
             }
 
             tracing::debug!("Cleaned up AppContainer profile");
+        }
+    }
+
+    // ── Handle-based recursive ACL walker ────────────────────────────────────
+
+    /// Apply a non-inheriting read or write ACE to a single object by handle.
+    ///
+    /// Opens the file/directory, reads existing DACL, adds the ACE for the
+    /// given SID, and writes back via `SetSecurityInfo` (handle-based = TOCTOU-safe).
+    fn apply_ace_by_handle(handle: RawHandle, sid_ptr: *mut c_void, sid_len: u32, write: bool) -> Result<(), String> {
+        unsafe {
+            let access_mask = if write { FILE_WRITE_MASK } else { FILE_READ_MASK };
+
+            // Read existing DACL from handle.
+            let mut existing_dacl: *mut c_void = ptr::null_mut();
+            let mut sd: *mut c_void = ptr::null_mut();
+            let err = GetSecurityInfo(
+                handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                ptr::null_mut(), ptr::null_mut(),
+                &mut existing_dacl, ptr::null_mut(), &mut sd,
+            );
+            if err != 0 {
+                return Err(format!("GetSecurityInfo failed: error {err}"));
+            }
+
+            // Get existing ACL info.
+            let mut acl_info: AclSizeInformation = std::mem::zeroed();
+            if !existing_dacl.is_null() {
+                GetAclInformation(
+                    existing_dacl,
+                    &mut acl_info as *mut _ as *mut c_void,
+                    std::mem::size_of::<AclSizeInformation>() as u32,
+                    2, // AclSizeInformation
+                );
+            }
+
+            // Build new ACE.
+            let ace_size = (std::mem::size_of::<AccessAllowedAce>() - std::mem::size_of::<u32>() + sid_len as usize) as u16;
+            let new_acl_size = if !existing_dacl.is_null() {
+                acl_info.AclBytesInUse + ace_size as u32
+            } else {
+                8 + ace_size as u32
+            };
+
+            let heap = GetProcessHeap();
+            let new_acl = HeapAlloc(heap, 0, new_acl_size as usize);
+            if new_acl.is_null() {
+                LocalFree(sd);
+                return Err("HeapAlloc for ACL failed".into());
+            }
+
+            if InitializeAcl(new_acl, new_acl_size, 2) == 0 {
+                HeapFree(heap, 0, new_acl);
+                LocalFree(sd);
+                return Err(format!("InitializeAcl failed: {}", io::Error::last_os_error()));
+            }
+
+            // Copy existing ACEs.
+            if !existing_dacl.is_null() {
+                for i in 0..acl_info.AceCount {
+                    let mut ace_ptr: *mut c_void = ptr::null_mut();
+                    if GetAce(existing_dacl, i, &mut ace_ptr) != 0 {
+                        let header = &*(ace_ptr as *const AceHeader);
+                        AddAce(new_acl, 2, 0xFFFFFFFF, ace_ptr, header.AceSize as u32);
+                    }
+                }
+            }
+
+            // Build and add new ACE (non-inheriting: AceFlags = 0).
+            let ace_buf = HeapAlloc(heap, 0, ace_size as usize);
+            if ace_buf.is_null() {
+                HeapFree(heap, 0, new_acl);
+                LocalFree(sd);
+                return Err("HeapAlloc for ACE failed".into());
+            }
+            std::ptr::write_bytes(ace_buf as *mut u8, 0, ace_size as usize);
+
+            let ace = &mut *(ace_buf as *mut AccessAllowedAce);
+            ace.Header.AceType = ACCESS_ALLOWED_ACE_TYPE;
+            ace.Header.AceFlags = 0; // Non-inheriting: TOCTOU-safe, no propagation
+            ace.Header.AceSize = ace_size;
+            ace.Mask = access_mask;
+
+            let sid_dest = &mut ace.SidStart as *mut u32 as *mut c_void;
+            CopySid(sid_len, sid_dest, sid_ptr);
+
+            AddAce(new_acl, 2, 0xFFFFFFFF, ace_buf, ace_size as u32);
+
+            // Apply via handle (TOCTOU-safe).
+            let result = SetSecurityInfo(
+                handle, SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null(), ptr::null(), new_acl, ptr::null(),
+            );
+
+            HeapFree(heap, 0, ace_buf);
+            HeapFree(heap, 0, new_acl);
+            LocalFree(sd);
+
+            if result != 0 {
+                Err(format!("SetSecurityInfo failed: error {result}"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Open a file/directory by path with security-safe flags.
+    ///
+    /// - `FILE_FLAG_BACKUP_SEMANTICS` — required to open directories
+    /// - `FILE_FLAG_OPEN_REPARSE_POINT` — don't follow symlinks/junctions
+    fn open_for_security(path: &Path) -> Result<RawHandle, String> {
+        let path_wide: Vec<u16> = path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        unsafe {
+            let handle = CreateFileW(
+                path_wide.as_ptr(),
+                READ_CONTROL | WRITE_DAC,  // Minimal rights to read+modify DACL
+                7, // FILE_SHARE_READ | WRITE | DELETE
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                ptr::null_mut(),
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                Err(format!("CreateFileW failed for '{}': {}", path.display(), io::Error::last_os_error()))
+            } else {
+                Ok(handle)
+            }
+        }
+    }
+
+    /// Check if a handle refers to a hardlink (nNumberOfLinks > 1).
+    fn is_hardlink(handle: RawHandle) -> bool {
+        unsafe {
+            let mut info: ByHandleFileInformation = std::mem::zeroed();
+            if GetFileInformationByHandle(handle, &mut info) != 0 {
+                info.nNumberOfLinks > 1
+            } else {
+                false
+            }
+        }
+    }
+
+    /// Extract filename from Win32FindDataW as a Rust String.
+    fn find_data_name(fd: &Win32FindDataW) -> String {
+        let len = fd.cFileName.iter().position(|&c| c == 0).unwrap_or(MAX_PATH);
+        String::from_utf16_lossy(&fd.cFileName[..len])
+    }
+
+    use std::os::windows::ffi::OsStrExt;
+
+    /// Recursively grant ACEs on a directory tree using handle-based operations.
+    ///
+    /// Security properties:
+    /// - Opens each object with `FILE_FLAG_OPEN_REPARSE_POINT` (no symlink following)
+    /// - Applies ACE via `SetSecurityInfo(handle)` (TOCTOU-safe)
+    /// - Detects hardlinks (`nNumberOfLinks > 1`) and skips them
+    /// - Skips directories in the `skip_dirs` list (e.g. target/, node_modules/)
+    ///
+    /// Returns the number of objects granted.
+    pub fn grant_recursive(
+        root: &Path,
+        sid_string: &str,
+        write: bool,
+        skip_dirs: &[String],
+    ) -> Result<usize, String> {
+        // Convert SID string to binary.
+        let sid_wide: Vec<u16> = sid_string.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sid_ptr: *mut c_void = ptr::null_mut();
+        unsafe {
+            if ConvertStringSidToSidW(sid_wide.as_ptr(), &mut sid_ptr) == 0 {
+                return Err(format!("ConvertStringSidToSidW failed: {}", io::Error::last_os_error()));
+            }
+        }
+        let sid_len = unsafe { GetLengthSid(sid_ptr) };
+
+        let result = grant_recursive_inner(root, sid_ptr, sid_len, write, skip_dirs);
+
+        unsafe { LocalFree(sid_ptr); }
+
+        result
+    }
+
+    /// Grant a read ACE on a single file or directory (non-recursive).
+    ///
+    /// Used to grant access to individual executables (e.g. tools in
+    /// `~/.cargo/bin`) that live outside the workspace grants.
+    pub fn grant_file(
+        path: &Path,
+        sid_string: &str,
+        write: bool,
+    ) -> Result<(), String> {
+        let sid_wide: Vec<u16> = sid_string.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sid_ptr: *mut c_void = ptr::null_mut();
+        unsafe {
+            if ConvertStringSidToSidW(sid_wide.as_ptr(), &mut sid_ptr) == 0 {
+                return Err(format!("ConvertStringSidToSidW failed: {}", io::Error::last_os_error()));
+            }
+        }
+        let sid_len = unsafe { GetLengthSid(sid_ptr) };
+
+        let result = match open_for_security(path) {
+            Ok(handle) => {
+                let r = apply_ace_by_handle(handle, sid_ptr, sid_len, write);
+                super::win32::CloseHandle(handle);
+                r
+            }
+            Err(e) => Err(e),
+        };
+
+        unsafe { LocalFree(sid_ptr); }
+        result
+    }
+
+    /// Grant read+traverse ACEs on a path and all its ancestor directories
+    /// up to (but not including) the drive root.
+    ///
+    /// This ensures the AppContainer can traverse the directory tree to reach
+    /// a file. Without traverse access on parent directories, the container
+    /// cannot resolve paths even if the target file itself has an ACE.
+    pub fn grant_path_and_ancestors(
+        path: &Path,
+        sid_string: &str,
+    ) -> Result<(), String> {
+        // Grant on the target itself.
+        grant_file(path, sid_string, false)?;
+
+        // Walk up and grant read on each ancestor directory.
+        let mut current = path.parent();
+        while let Some(dir) = current {
+            // Stop at drive roots (e.g. "E:\") or filesystem root.
+            if dir.parent().is_none() {
+                break;
+            }
+            // Grant read (not write) on each ancestor.
+            if let Err(e) = grant_file(dir, sid_string, false) {
+                tracing::debug!(path = %dir.display(), error = %e, "Failed to grant ancestor traverse");
+                // Don't fail hard — ancestor may already have a suitable ACE.
+                break;
+            }
+            current = dir.parent();
+        }
+        Ok(())
+    }
+
+    fn grant_recursive_inner(
+        dir: &Path,
+        sid_ptr: *mut c_void,
+        sid_len: u32,
+        write: bool,
+        skip_dirs: &[String],
+    ) -> Result<usize, String> {
+        let mut count = 0;
+
+        // Grant on the directory itself.
+        match open_for_security(dir) {
+            Ok(handle) => {
+                if !is_hardlink(handle) {
+                    let _ = apply_ace_by_handle(handle, sid_ptr, sid_len, write);
+                    count += 1;
+                }
+                super::win32::CloseHandle(handle);
+            }
+            Err(e) => {
+                tracing::debug!(path = %dir.display(), error = %e, "Skipping directory (open failed)");
+                return Ok(0);
+            }
+        }
+
+        // Enumerate children.
+        let pattern = dir.join("*");
+        let pattern_wide: Vec<u16> = pattern.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        unsafe {
+            let mut fd: Win32FindDataW = std::mem::zeroed();
+            let find_handle = FindFirstFileW(pattern_wide.as_ptr(), &mut fd);
+            if find_handle == INVALID_HANDLE_VALUE {
+                return Ok(count);
+            }
+
+            loop {
+                let name = find_data_name(&fd);
+
+                // Skip . and ..
+                if name == "." || name == ".." {
+                    if FindNextFileW(find_handle, &mut fd) == 0 { break; }
+                    continue;
+                }
+
+                let child_path = dir.join(&name);
+                let is_dir = fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+                let is_reparse = fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+
+                // Skip reparse points (symlinks, junctions).
+                if is_reparse {
+                    tracing::debug!(path = %child_path.display(), "Skipping reparse point");
+                    if FindNextFileW(find_handle, &mut fd) == 0 { break; }
+                    continue;
+                }
+
+                if is_dir {
+                    // Check skip list.
+                    let lower = name.to_lowercase();
+                    if skip_dirs.iter().any(|s| s.to_lowercase() == lower) {
+                        tracing::debug!(path = %child_path.display(), "Skipping directory (in skip list)");
+                        if FindNextFileW(find_handle, &mut fd) == 0 { break; }
+                        continue;
+                    }
+
+                    // Recurse.
+                    match grant_recursive_inner(&child_path, sid_ptr, sid_len, write, skip_dirs) {
+                        Ok(n) => count += n,
+                        Err(e) => tracing::debug!(path = %child_path.display(), error = %e, "Skipping subtree"),
+                    }
+                } else {
+                    // File: open handle, check hardlink, apply ACE.
+                    if let Ok(handle) = open_for_security(&child_path) {
+                        if !is_hardlink(handle) {
+                            let _ = apply_ace_by_handle(handle, sid_ptr, sid_len, write);
+                            count += 1;
+                        } else {
+                            tracing::debug!(path = %child_path.display(), "Skipping hardlink");
+                        }
+                        super::win32::CloseHandle(handle);
+                    }
+                }
+
+                if FindNextFileW(find_handle, &mut fd) == 0 {
+                    break;
+                }
+            }
+
+            FindClose(find_handle);
+        }
+
+        Ok(count)
+    }
+
+    /// Recursively remove ACEs for a specific SID from a directory tree.
+    ///
+    /// Walks the same tree as `grant_recursive` and removes any ACE that
+    /// references the given SID.
+    pub fn revoke_recursive(root: &Path, sid_string: &str) -> Result<(), String> {
+        let sid_wide: Vec<u16> = sid_string.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sid_ptr: *mut c_void = ptr::null_mut();
+        unsafe {
+            if ConvertStringSidToSidW(sid_wide.as_ptr(), &mut sid_ptr) == 0 {
+                return Err(format!("ConvertStringSidToSidW failed: {}", io::Error::last_os_error()));
+            }
+        }
+        let sid_len = unsafe { GetLengthSid(sid_ptr) };
+
+        revoke_recursive_inner(root, sid_ptr, sid_len);
+
+        unsafe { LocalFree(sid_ptr); }
+        Ok(())
+    }
+
+    unsafe extern "system" {
+        fn EqualSid(sid1: *const c_void, sid2: *const c_void) -> i32;
+    }
+
+    fn revoke_recursive_inner(dir: &Path, sid_ptr: *mut c_void, sid_len: u32) {
+        // Revoke on the directory itself.
+        revoke_single_object(dir, sid_ptr, sid_len);
+
+        // Enumerate children.
+        let pattern = dir.join("*");
+        let pattern_wide: Vec<u16> = pattern.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        unsafe {
+            let mut fd: Win32FindDataW = std::mem::zeroed();
+            let find_handle = FindFirstFileW(pattern_wide.as_ptr(), &mut fd);
+            if find_handle == INVALID_HANDLE_VALUE {
+                return;
+            }
+
+            loop {
+                let name = find_data_name(&fd);
+                if name == "." || name == ".." {
+                    if FindNextFileW(find_handle, &mut fd) == 0 { break; }
+                    continue;
+                }
+
+                let child_path = dir.join(&name);
+                let is_dir = fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+                let is_reparse = fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+
+                if is_reparse {
+                    if FindNextFileW(find_handle, &mut fd) == 0 { break; }
+                    continue;
+                }
+
+                if is_dir {
+                    revoke_recursive_inner(&child_path, sid_ptr, sid_len);
+                } else {
+                    revoke_single_object(&child_path, sid_ptr, sid_len);
+                }
+
+                if FindNextFileW(find_handle, &mut fd) == 0 { break; }
+            }
+
+            FindClose(find_handle);
+        }
+    }
+
+    /// Remove all ACEs for a specific SID from a single object.
+    fn revoke_single_object(path: &Path, target_sid: *mut c_void, _sid_len: u32) {
+        let handle = match open_for_security(path) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+
+        unsafe {
+            let mut existing_dacl: *mut c_void = ptr::null_mut();
+            let mut sd: *mut c_void = ptr::null_mut();
+            let err = GetSecurityInfo(
+                handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                ptr::null_mut(), ptr::null_mut(),
+                &mut existing_dacl, ptr::null_mut(), &mut sd,
+            );
+            if err != 0 || existing_dacl.is_null() {
+                super::win32::CloseHandle(handle);
+                if !sd.is_null() { LocalFree(sd); }
+                return;
+            }
+
+            let mut acl_info: AclSizeInformation = std::mem::zeroed();
+            GetAclInformation(
+                existing_dacl,
+                &mut acl_info as *mut _ as *mut c_void,
+                std::mem::size_of::<AclSizeInformation>() as u32,
+                2,
+            );
+
+            // Build new ACL without the target SID's ACEs.
+            let heap = GetProcessHeap();
+            let new_acl_size = acl_info.AclBytesInUse; // Same or smaller.
+            let new_acl = HeapAlloc(heap, 0, new_acl_size as usize);
+            if new_acl.is_null() {
+                LocalFree(sd);
+                super::win32::CloseHandle(handle);
+                return;
+            }
+
+            if InitializeAcl(new_acl, new_acl_size, 2) == 0 {
+                HeapFree(heap, 0, new_acl);
+                LocalFree(sd);
+                super::win32::CloseHandle(handle);
+                return;
+            }
+
+            let mut changed = false;
+            for i in 0..acl_info.AceCount {
+                let mut ace_ptr: *mut c_void = ptr::null_mut();
+                if GetAce(existing_dacl, i, &mut ace_ptr) == 0 {
+                    continue;
+                }
+
+                let header = &*(ace_ptr as *const AceHeader);
+
+                // Check if this is an ACCESS_ALLOWED_ACE with our SID.
+                if header.AceType == ACCESS_ALLOWED_ACE_TYPE {
+                    let ace = &*(ace_ptr as *const AccessAllowedAce);
+                    let ace_sid = &ace.SidStart as *const u32 as *const c_void;
+                    if EqualSid(ace_sid, target_sid) != 0 {
+                        changed = true;
+                        continue; // Skip this ACE (remove it).
+                    }
+                }
+
+                // Keep this ACE.
+                AddAce(new_acl, 2, 0xFFFFFFFF, ace_ptr, header.AceSize as u32);
+            }
+
+            if changed {
+                SetSecurityInfo(
+                    handle, SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                    ptr::null(), ptr::null(), new_acl, ptr::null(),
+                );
+            }
+
+            HeapFree(heap, 0, new_acl);
+            LocalFree(sd);
+            super::win32::CloseHandle(handle);
         }
     }
 
@@ -1240,7 +1820,16 @@ pub mod appcontainer {
 }
 
 #[cfg(windows)]
-pub use appcontainer::{AppContainer, spawn_in_appcontainer};
+pub use appcontainer::{AppContainer, spawn_in_appcontainer, grant_recursive, grant_path_and_ancestors};
+
+/// Delete an AppContainer profile by its wide-encoded name.
+///
+/// Public wrapper around the FFI `DeleteAppContainerProfile` so the pool
+/// module can clean up orphaned containers without reaching into private FFI.
+#[cfg(windows)]
+pub fn delete_appcontainer_profile(name_wide: &[u16]) {
+    appcontainer::delete_profile(name_wide);
+}
 
 #[cfg(test)]
 #[cfg(windows)]

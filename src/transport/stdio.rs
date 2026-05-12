@@ -384,9 +384,10 @@ async fn handle_tools_call(
             // Build sandbox profile from the key's filesystem grants.
             let sandbox_profile = crate::sandbox::SandboxProfile::from_key_config(key_config);
 
-            // Execute with the sandbox profile set in the task-local.
-            crate::sandbox::with_profile(
+            // Execute with the sandbox profile and key name set in the task-local.
+            crate::sandbox::with_profile_and_key(
                 sandbox_profile,
+                session.key_name.clone(),
                 execute_tool(id, tool, &arguments, config, audit, session, tool_name, &env_grants),
             ).await
         }
@@ -460,8 +461,9 @@ async fn handle_tools_call(
                     }
                 }
 
-                return crate::sandbox::with_profile(
+                return crate::sandbox::with_profile_and_key(
                     sandbox_profile,
+                    session.key_name.clone(),
                     execute_tool(id, tool, &arguments, config, audit, session, tool_name, &env_grants),
                 ).await;
             }
@@ -499,6 +501,7 @@ async fn handle_tools_call(
 }
 
 /// Execute a tool after authorization has been granted.
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool(
     id: Value,
     tool: &dyn crate::tools::McpTool,

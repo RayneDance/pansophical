@@ -17,6 +17,34 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::schema::SandboxConfig;
 
+// ── Global container pool (Windows only) ─────────────────────────────────────
+
+#[cfg(windows)]
+use std::sync::OnceLock;
+
+#[cfg(windows)]
+static CONTAINER_POOL: OnceLock<crate::sandbox::pool::ContainerPool> = OnceLock::new();
+
+/// Initialize the global AppContainer pool. Call once at server start.
+#[cfg(windows)]
+pub async fn init_container_pool(sandbox_config: &SandboxConfig, config_dir: std::path::PathBuf) {
+    let pool = crate::sandbox::pool::ContainerPool::new(
+        config_dir,
+        sandbox_config.skip_dirs.clone(),
+    );
+    pool.cleanup_orphans().await;
+    let _ = CONTAINER_POOL.set(pool);
+    info!("AppContainer pool initialized");
+}
+
+/// Cleanup all pooled containers. Call on graceful shutdown.
+#[cfg(windows)]
+pub async fn cleanup_container_pool() {
+    if let Some(pool) = CONTAINER_POOL.get() {
+        pool.cleanup_all().await;
+    }
+}
+
 /// Outcome of a reaped child process.
 #[derive(Debug)]
 pub enum ReapResult {
@@ -148,16 +176,14 @@ fn build_env_vars(
 
     #[cfg(windows)]
     {
-        if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("SYSTEMROOT")) {
-            if let Ok(val) = std::env::var("SYSTEMROOT") {
+        if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("SYSTEMROOT"))
+            && let Ok(val) = std::env::var("SYSTEMROOT") {
                 vars.push(("SYSTEMROOT".into(), val));
             }
-        }
-        if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("COMSPEC")) {
-            if let Ok(val) = std::env::var("COMSPEC") {
+        if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("COMSPEC"))
+            && let Ok(val) = std::env::var("COMSPEC") {
                 vars.push(("COMSPEC".into(), val));
             }
-        }
     }
 
     for (k, v) in granted_env {
@@ -196,11 +222,10 @@ async fn spawn_normal(
 
     #[cfg(windows)]
     {
-        if let Some(pid) = child.id() {
-            if let Err(e) = assign_to_server_job(pid) {
+        if let Some(pid) = child.id()
+            && let Err(e) = assign_to_server_job(pid) {
                 warn!(program = program, pid = pid, "Failed to assign child to Job Object: {e}");
             }
-        }
     }
 
     let mut child_stdout = child.stdout.take();
@@ -304,6 +329,10 @@ async fn spawn_landlock_linux(
 // ── Windows AppContainer Spawn ────────────────────────────────────────────────
 
 /// Spawn a child within an AppContainer sandbox (Windows only).
+///
+/// Uses the session-scoped container pool to reuse containers across tool calls.
+/// On first call for a key, creates the container and runs recursive ACL grants.
+/// On subsequent calls, reuses the cached container (instant).
 #[cfg(windows)]
 async fn spawn_appcontainer_windows(
     program: &str,
@@ -313,42 +342,55 @@ async fn spawn_appcontainer_windows(
     max_output_bytes: u64,
     profile: &crate::sandbox::SandboxProfile,
 ) -> Result<ReapResult, std::io::Error> {
-    use crate::sandbox::windows::{build_env_block, AppContainer, spawn_in_appcontainer};
+    use crate::sandbox::windows::{build_env_block, spawn_in_appcontainer};
     use std::time::Duration;
     use tokio::time::timeout;
 
-    // Create AppContainer profile
-    let mut container = AppContainer::create()?;
-    info!(sid = %container.sid_string, "AppContainer created");
+    // Get or create a pooled container.
+    let pool = CONTAINER_POOL.get().ok_or_else(|| {
+        std::io::Error::other("Container pool not initialized")
+    })?;
 
-    // Grant access to write paths
-    for path in &profile.write_paths {
-        let raw = path.display().to_string();
-        let clean = crate::sandbox::strip_glob_suffix(&raw);
-        let clean_path = std::path::Path::new(&clean);
-        if clean_path.exists() {
-            match container.grant_access(clean_path, true) {
-                Ok(()) => debug!(path = %clean, "AppContainer: granted write"),
-                Err(e) => warn!(path = %clean, error = %e, "AppContainer: failed to grant write"),
-            }
-        }
-    }
+    // Derive key_id from the current session context.
+    // Use a hash of the profile's paths as a stable identifier.
+    let key_id = crate::sandbox::pool::current_key_id();
+    let entry = pool.get_or_create(
+        &key_id,
+        &profile.read_paths,
+        &profile.write_paths,
+    ).await.map_err(std::io::Error::other)?;
 
-    // Grant access to read paths
-    for path in &profile.read_paths {
-        let raw = path.display().to_string();
-        let clean = crate::sandbox::strip_glob_suffix(&raw);
-        let clean_path = std::path::Path::new(&clean);
-        if clean_path.exists() {
-            match container.grant_access(clean_path, false) {
-                Ok(()) => debug!(path = %clean, "AppContainer: granted read"),
-                Err(e) => warn!(path = %clean, error = %e, "AppContainer: failed to grant read"),
-            }
+    // Resolve the program to an absolute path so we can grant the container
+    // access to the executable itself (it may live outside the granted workspace,
+    // e.g. ~/.cargo/bin/ast-outline.exe).
+    let resolved_program = resolve_program_path(program, env_vars);
+    if let Some(ref exe_path) = resolved_program {
+        if let Err(e) = crate::sandbox::windows::grant_path_and_ancestors(
+            exe_path, &entry.container.sid_string,
+        ) {
+            warn!(
+                program = program,
+                path = %exe_path.display(),
+                error = %e,
+                "Failed to grant AppContainer access to executable — spawn may fail"
+            );
+        } else {
+            debug!(
+                program = program,
+                path = %exe_path.display(),
+                "Granted AppContainer access to executable and ancestors"
+            );
         }
     }
 
     // Build command line string (Windows format).
-    let mut cmd_line = shell_escape_win(program);
+    // Use the resolved absolute path if available so CreateProcess doesn't
+    // need to search PATH inside the container.
+    let exe_str = resolved_program
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| program.to_string());
+    let mut cmd_line = shell_escape_win(&exe_str);
     for arg in args {
         cmd_line.push(' ');
         cmd_line.push_str(&shell_escape_win(arg));
@@ -356,8 +398,8 @@ async fn spawn_appcontainer_windows(
 
     let env_block = build_env_block(env_vars);
 
-    info!(cmd_line = %cmd_line, sid = %container.sid_string, allow_network = profile.allow_network, "AppContainer: spawning child process");
-    let (pi, stdout_handle, stderr_handle) = spawn_in_appcontainer(&container, &cmd_line, &env_block, profile.allow_network)?;
+    info!(cmd_line = %cmd_line, sid = %entry.container.sid_string, allow_network = profile.allow_network, "AppContainer: spawning child process (pooled)");
+    let (pi, stdout_handle, stderr_handle) = spawn_in_appcontainer(&entry.container, &cmd_line, &env_block, profile.allow_network)?;
 
     let pid = pi.dwProcessId;
     let process_h = pi.hProcess as usize;
@@ -368,8 +410,8 @@ async fn spawn_appcontainer_windows(
     // Close the thread handle — we only need the process handle.
     crate::sandbox::windows::win32::CloseHandle(thread_h as std::os::windows::io::RawHandle);
 
-    info!(program = program, pid = pid, sandboxed = true, container = %container.sid_string,
-        "Child spawned in AppContainer");
+    info!(program = program, pid = pid, sandboxed = true, container = %entry.container.sid_string,
+        "Child spawned in AppContainer (pooled)");
 
     if let Err(e) = assign_to_server_job(pid) {
         warn!(pid = pid, "Failed to assign sandboxed child to Job Object: {e}");
@@ -387,15 +429,16 @@ async fn spawn_appcontainer_windows(
 
     // Wait for process with timeout.
     let duration = Duration::from_secs(timeout_secs);
-    let wait_h = process_h; // Copy for the wait task
-    let kill_h = process_h; // Copy for potential timeout kill
+    let wait_h = process_h;
+    let kill_h = process_h;
     let wait_result = timeout(duration,
         tokio::task::spawn_blocking(move || {
             wait_for_process(wait_h as std::os::windows::io::RawHandle)
         })
     ).await;
 
-    // AppContainer profile is automatically deleted here when `container` is dropped.
+    // Release the pool entry (decrement active count). Container is NOT dropped.
+    crate::sandbox::pool::ContainerPool::release(&entry);
 
     match wait_result {
         Ok(Ok(Ok(exit_code))) => {
@@ -445,7 +488,7 @@ async fn spawn_restricted_windows(
     let stderr_h = stderr_handle as usize;
 
     // All raw handles are now captured as usize. Drop pi to prevent !Send contamination.
-    drop(pi);
+    let _ = pi;
 
     info!(program = program, pid = pid, sandboxed = true,
         "Child spawned with Low Integrity token");
@@ -544,6 +587,44 @@ fn read_raw_handle(handle: std::os::windows::io::RawHandle, max_bytes: u64) -> V
     output
 }
 
+/// Resolve a program name to its absolute path using the PATH from `env_vars`.
+///
+/// If the program is already an absolute path and exists, returns it directly.
+/// Otherwise searches each PATH directory for `program` (with `.exe` suffix on
+/// Windows). Returns `None` if the program cannot be found.
+#[cfg(windows)]
+fn resolve_program_path(program: &str, env_vars: &[(String, String)]) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    let path = PathBuf::from(program);
+
+    // If already absolute and exists, use it directly.
+    if path.is_absolute() && path.exists() {
+        return Some(path);
+    }
+
+    // Find PATH in the child's env vars.
+    let path_var = env_vars.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+
+    for dir in std::env::split_paths(path_var) {
+        // Try exact name first.
+        let candidate = dir.join(program);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        // Try with .exe suffix.
+        let with_exe = dir.join(format!("{program}.exe"));
+        if with_exe.exists() {
+            return Some(with_exe);
+        }
+    }
+
+    None
+}
+
 #[cfg(windows)]
 fn shell_escape_win(s: &str) -> String {
     if s.contains(' ') || s.contains('"') {
@@ -584,10 +665,6 @@ fn truncate_output(data: Vec<u8>, max_bytes: u64) -> Vec<u8> {
     truncated
 }
 
-// ── Windows Job Object ────────────────────────────────────────────────────────
-
-#[cfg(windows)]
-use std::sync::OnceLock;
 
 #[cfg(windows)]
 static SERVER_JOB: OnceLock<crate::sandbox::windows::JobObject> = OnceLock::new();
@@ -636,6 +713,7 @@ mod tests {
             ],
             allow_fallback: true,
             deny_network: true,
+            skip_dirs: vec![],
         }
     }
 

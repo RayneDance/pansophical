@@ -89,6 +89,7 @@ impl ConfirmState {
 ///
 /// Returns `Some(ApprovalResult)` if the user responds, `None` if the
 /// token expires (auto-deny).
+#[allow(clippy::too_many_arguments)]
 pub async fn request_confirmation(
     state: &Arc<ConfirmState>,
     tool_name: &str,
@@ -152,7 +153,7 @@ pub async fn request_confirmation(
         &crate::audit::AuditEntry::new(connection_id, key_name)
             .with_tool(tool_name)
             .with_decision("pending")
-            .with_detail(&format!("confirm required, url={url}")),
+            .with_detail(format!("confirm required, url={url}")),
     );
 
     // Try to open the browser.
@@ -353,7 +354,7 @@ async fn handle_decision(
                 &crate::audit::AuditEntry::new(&req.connection_id, &req.key_name)
                     .with_tool(&req.tool_name)
                     .with_decision(decision)
-                    .with_detail(&format!(
+                    .with_detail(format!(
                         "user {} via confirm UI, scope={:?}",
                         decision, scope
                     )),
@@ -414,21 +415,18 @@ fn check_pin(state: &ConfirmState, headers: &axum::http::HeaderMap, query: &str)
     if let Some(qpin) = query
         .split('&')
         .find_map(|p| p.strip_prefix("pin="))
-    {
-        if qpin == state.admin_pin {
+        && qpin == state.admin_pin {
             return true;
         }
-    }
 
     // Check cookie: admin_pin=...
     if let Some(cookie_header) = headers.get("cookie").and_then(|v| v.to_str().ok()) {
         for cookie in cookie_header.split(';') {
             let cookie = cookie.trim();
-            if let Some(val) = cookie.strip_prefix("admin_pin=") {
-                if val == state.admin_pin {
+            if let Some(val) = cookie.strip_prefix("admin_pin=")
+                && val == state.admin_pin {
                     return true;
                 }
-            }
         }
     }
 
@@ -492,7 +490,7 @@ async fn show_dashboard(
     };
 
     let html = ui::dashboard_page(
-        env!("CARGO_PKG_VERSION"),
+        &crate::build_version(),
         &tools_json,
         &keys_json,
         pending_count,
@@ -646,7 +644,7 @@ async fn api_grants_add(
         &crate::audit::AuditEntry::new("admin", "admin")
             .with_tool(&body.tool_name)
             .with_decision("granted")
-            .with_detail(&format!(
+            .with_detail(format!(
                 "manual grant via UI: {} {} scope={:?}",
                 body.resource, body.perm, scope
             )),
@@ -694,7 +692,7 @@ async fn api_grants_remove(
         &crate::audit::AuditEntry::new("admin", "admin")
             .with_tool(&body.tool_name)
             .with_decision("revoked")
-            .with_detail(&format!(
+            .with_detail(format!(
                 "manual revoke via UI: {} {}",
                 body.resource, body.perm
             )),
