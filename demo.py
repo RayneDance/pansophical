@@ -6,7 +6,7 @@ A minimal CLI that connects an LLM (Vertex AI) to Pansophical's
 MCP server, demonstrating the full authorization and tool-calling pipeline.
 
 Usage:
-    python demo.py [--config config.toml] [--binary target/debug/pansophical.exe]
+    python demo.py [--config config.toml] [--binary target/debug/pansophical.exe] [--debug]
 
 No pip dependencies — uses only Python stdlib.
 """
@@ -320,6 +320,7 @@ def main():
     parser = argparse.ArgumentParser(description="Pansophical Demo — Vertex AI + MCP")
     parser.add_argument("--config", default="config.toml", help="Path to config.toml")
     parser.add_argument("--binary", default=None, help="Path to pansophical binary")
+    parser.add_argument("--debug", action="store_true", help="Show server stderr logs after each tool call")
     args = parser.parse_args()
 
     # Find the binary — check cwd first, then target/.
@@ -500,9 +501,9 @@ def main():
                     # Call via MCP.
                     result = mcp.call_tool(tool_name, tool_args)
 
-                    # Show server logs emitted during the tool call.
+                    # Show server logs emitted during the tool call (debug mode only).
                     new_stderr = mcp._stderr_lines[stderr_before:]
-                    if new_stderr:
+                    if args.debug and new_stderr:
                         cprint(C.DIM, f"  📋 Server logs ({len(new_stderr)} lines):")
                         for log_line in new_stderr[-30:]:
                             # Truncate long lines.

@@ -1,0 +1,32 @@
+# ══════════════════════════════════════════════════════════════════
+# Google Search
+# ══════════════════════════════════════════════════════════════════
+# Performs a web search via Google and returns results as HTML.
+# The AI agent can parse the response for links and summaries.
+#
+# Uses curl to fetch Google search results with a plain user-agent
+# so Google returns a lightweight HTML page.
+#
+# Requires a network grant in the key's policy rules.
+
+name            = "google_search"
+description     = "Search Google for a query and return the results page. The response is HTML containing search result titles, URLs, and snippets. Parse the output to extract relevant information."
+command         = "curl"
+args            = [
+    "-s", "-L",
+    "--max-time", "10",
+    "-H", "User-Agent: Mozilla/5.0 (compatible; Pansophical/1.0)",
+    "https://www.google.com/search?q={query}&num=10&hl=en",
+]
+allow_shell     = false
+arg_passthrough = false
+
+[[parameters]]
+name        = "query"
+description = "The search query string"
+required    = true
+
+[[resources]]
+type = "network"
+path = "*"
+perm = "r"
