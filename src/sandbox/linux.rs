@@ -22,7 +22,7 @@ use std::path::Path;
 use std::process::Command;
 
 use landlock::{
-    path_beneath_rules, AccessFs, AccessNet, Ruleset, RulesetAttr,
+    path_beneath_rules, Access, AccessFs, AccessNet, Ruleset, RulesetAttr,
     RulesetCreatedAttr, RulesetStatus, ABI,
 };
 
