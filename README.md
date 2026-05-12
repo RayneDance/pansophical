@@ -1,6 +1,6 @@
 # Pansophical
 
-> **⚠️ Work in progress.** This project is under active development and was largely LLM-generated. I make no guarantees about security or safety. The sandboxing has not been fully audited. Use at your own risk — releases won't happen until significant review and testing is complete.
+> **⚠️ Pre-release.** This project is under active development. The sandbox architecture is functional and tested but has not been formally audited. Pre-built binaries are available for testing — see [Releases](https://github.com/RayneDance/pansophical/releases).
 
 **Security-first MCP server with intersection-based authorization and OS-level sandboxing.**
 
@@ -9,6 +9,73 @@ Pansophical is a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP
 ## Why
 
 MCP gives agents access to your filesystem, shell, and APIs. Most MCP servers trust the agent implicitly. Pansophical doesn't. Every tool call passes through a deny-before-grant authorization engine that intersects the agent's request against your explicit policy — and anything not granted is denied.
+
+## Install
+
+### From GitHub Releases (recommended)
+
+Download the latest binary for your platform from [Releases](https://github.com/RayneDance/pansophical/releases) and place it on your PATH.
+
+**Linux:**
+```bash
+curl -fsSL https://github.com/RayneDance/pansophical/releases/latest/download/pansophical-v0.2.0-linux-x86_64.tar.gz | tar xz
+sudo mv pansophical /usr/local/bin/
+```
+
+**Windows:** download `pansophical-v0.2.0-windows-x86_64.zip` from the release page and extract to a directory on your PATH.
+
+### From source
+
+```bash
+cargo install --git https://github.com/RayneDance/pansophical.git
+```
+
+Or clone and build:
+```bash
+git clone https://github.com/RayneDance/pansophical.git
+cd pansophical
+cargo build --release
+# Binary at target/release/pansophical(.exe)
+```
+
+To build without the `--demo` command (smaller binary):
+```bash
+cargo build --release --no-default-features
+```
+
+## Quickstart
+
+### 1. Initialize
+
+```bash
+# Minimal setup — config.toml + empty tools/ directory
+pansophical --init
+
+# Full demo — AST tools, web search, scoped key, system prompt
+pansophical --demo
+```
+
+### 2. Configure a key
+
+`--init` generates a demo key. For production, edit `config.toml`:
+
+```toml
+[keys.my_agent]
+token = "sk_replace_with_a_real_token"
+
+# Grant access to all tools
+[[keys.my_agent.rules]]
+effect = "grant"
+type   = "tool"
+name   = "*"
+
+# Grant read/write to your workspace
+[[keys.my_agent.rules]]
+effect = "grant"
+type   = "filesystem"
+path   = "/home/user/workspace/**"
+perm   = "rw"
+```
 
 ## Features
 
@@ -41,71 +108,21 @@ MCP gives agents access to your filesystem, shell, and APIs. Most MCP servers tr
 - **Admin dashboard** — web UI at `:9765` showing tools, keys, pending confirmations, and audit log
 - **Full audit trail** — append-only JSON log of every authorization decision
 
-## Quickstart
-
-### 1. Build
-
-```bash
-cargo build --release
-```
-
-### 2. Initialize config
-
-```bash
-./target/release/pansophical --init
-```
-
-This generates `config.toml` with a random server secret and a `tools/` directory with example script tool definitions.
-
-### 3. Add a key
-
-Open `config.toml` and add a key for your agent:
-
-```toml
-[keys.my_agent]
-token = "sk_replace_with_a_real_token"
-
-# Grant access to all tools
-[[keys.my_agent.rules]]
-effect = "grant"
-type   = "tool"
-name   = "*"
-
-# Grant read/write to your workspace
-[[keys.my_agent.rules]]
-effect = "grant"
-type   = "filesystem"
-path   = "/home/user/workspace/**"
-perm   = "rw"
-```
-
-### 4. Run
+### 3. Run
 
 ```bash
 # Stdio mode (for local agents like Claude Desktop, Cursor, etc.)
-./target/release/pansophical --config config.toml
+pansophical
 
-# HTTP mode (for remote agents)
-# Set transport = "http" in config.toml
-./target/release/pansophical --config config.toml
+# HTTP mode — set transport = "http" in config.toml
+pansophical
 
-# Both simultaneously
-# Set transport = "both" in config.toml
+# Both simultaneously — set transport = "both" in config.toml
 ```
 
-### 5. Open the dashboard
+### 4. Dashboard
 
 Navigate to [http://127.0.0.1:9765](http://127.0.0.1:9765) to see registered tools, configured keys, and the live audit log.
-
-### 6. Try the demo (optional)
-
-A zero-dependency Python harness connects Vertex AI (Gemini) to Pansophical for interactive tool-calling:
-
-```bash
-python demo.py [--config config.toml] [--binary target/debug/pansophical.exe]
-```
-
-Requires `gcloud` auth (`gcloud auth print-access-token`) for Vertex AI. Spawns the MCP server as a subprocess, discovers available tools, and drops you into a chat where Gemini can call your registered tools through the full authz pipeline.
 
 ## Configuration
 
