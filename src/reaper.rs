@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::schema::SandboxConfig;
 
@@ -346,25 +346,51 @@ async fn spawn_appcontainer_windows(
     use std::time::Duration;
     use tokio::time::timeout;
 
+    let spawn_start = std::time::Instant::now();
+    info!(program = program, args = ?args, "AppContainer spawn: starting");
+
     // Get or create a pooled container.
     let pool = CONTAINER_POOL.get().ok_or_else(|| {
         std::io::Error::other("Container pool not initialized")
     })?;
 
-    // Derive key_id from the current session context.
-    // Use a hash of the profile's paths as a stable identifier.
     let key_id = crate::sandbox::pool::current_key_id();
+    info!(key_id = %key_id, "AppContainer spawn: requesting container from pool");
+
+    let pool_start = std::time::Instant::now();
     let entry = pool.get_or_create(
         &key_id,
         &profile.read_paths,
         &profile.write_paths,
     ).await.map_err(std::io::Error::other)?;
 
-    // Resolve the program to an absolute path so we can grant the container
-    // access to the executable itself (it may live outside the granted workspace,
-    // e.g. ~/.cargo/bin/ast-outline.exe).
+    info!(
+        key_id = %key_id,
+        sid = %entry.container.sid_string,
+        pool_ms = pool_start.elapsed().as_millis() as u64,
+        "AppContainer spawn: got container from pool"
+    );
+
+    // Resolve the program to an absolute path.
+    let resolve_start = std::time::Instant::now();
     let resolved_program = resolve_program_path(program, env_vars);
+    match &resolved_program {
+        Some(p) => info!(
+            program = program,
+            resolved = %p.display(),
+            resolve_ms = resolve_start.elapsed().as_millis() as u64,
+            "AppContainer spawn: resolved executable path"
+        ),
+        None => warn!(
+            program = program,
+            resolve_ms = resolve_start.elapsed().as_millis() as u64,
+            "AppContainer spawn: could NOT resolve executable path — will try raw name"
+        ),
+    }
+
+    // Grant container access to the executable and its ancestors.
     if let Some(ref exe_path) = resolved_program {
+        let grant_start = std::time::Instant::now();
         if let Err(e) = crate::sandbox::windows::grant_path_and_ancestors(
             exe_path, &entry.container.sid_string,
         ) {
@@ -372,20 +398,20 @@ async fn spawn_appcontainer_windows(
                 program = program,
                 path = %exe_path.display(),
                 error = %e,
-                "Failed to grant AppContainer access to executable — spawn may fail"
+                grant_ms = grant_start.elapsed().as_millis() as u64,
+                "AppContainer spawn: failed to grant exe access — spawn may fail"
             );
         } else {
-            debug!(
+            info!(
                 program = program,
                 path = %exe_path.display(),
-                "Granted AppContainer access to executable and ancestors"
+                grant_ms = grant_start.elapsed().as_millis() as u64,
+                "AppContainer spawn: granted exe + ancestor access"
             );
         }
     }
 
-    // Build command line string (Windows format).
-    // Use the resolved absolute path if available so CreateProcess doesn't
-    // need to search PATH inside the container.
+    // Build command line.
     let exe_str = resolved_program
         .as_ref()
         .map(|p| p.display().to_string())
@@ -398,7 +424,14 @@ async fn spawn_appcontainer_windows(
 
     let env_block = build_env_block(env_vars);
 
-    info!(cmd_line = %cmd_line, sid = %entry.container.sid_string, allow_network = profile.allow_network, "AppContainer: spawning child process (pooled)");
+    info!(
+        cmd_line = %cmd_line,
+        sid = %entry.container.sid_string,
+        allow_network = profile.allow_network,
+        pre_spawn_ms = spawn_start.elapsed().as_millis() as u64,
+        "AppContainer spawn: calling CreateProcessW"
+    );
+
     let (pi, stdout_handle, stderr_handle) = spawn_in_appcontainer(&entry.container, &cmd_line, &env_block, profile.allow_network)?;
 
     let pid = pi.dwProcessId;
@@ -410,8 +443,12 @@ async fn spawn_appcontainer_windows(
     // Close the thread handle — we only need the process handle.
     crate::sandbox::windows::win32::CloseHandle(thread_h as std::os::windows::io::RawHandle);
 
-    info!(program = program, pid = pid, sandboxed = true, container = %entry.container.sid_string,
-        "Child spawned in AppContainer (pooled)");
+    info!(
+        program = program,
+        pid = pid,
+        create_process_ms = spawn_start.elapsed().as_millis() as u64,
+        "AppContainer spawn: child process created"
+    );
 
     if let Err(e) = assign_to_server_job(pid) {
         warn!(pid = pid, "Failed to assign sandboxed child to Job Object: {e}");
@@ -431,6 +468,7 @@ async fn spawn_appcontainer_windows(
     let duration = Duration::from_secs(timeout_secs);
     let wait_h = process_h;
     let kill_h = process_h;
+    info!(program = program, pid = pid, timeout_secs, "AppContainer spawn: waiting for child");
     let wait_result = timeout(duration,
         tokio::task::spawn_blocking(move || {
             wait_for_process(wait_h as std::os::windows::io::RawHandle)
@@ -442,14 +480,34 @@ async fn spawn_appcontainer_windows(
 
     match wait_result {
         Ok(Ok(Ok(exit_code))) => {
+            info!(
+                program = program, pid = pid, exit_code = ?exit_code,
+                total_ms = spawn_start.elapsed().as_millis() as u64,
+                "AppContainer spawn: child exited"
+            );
             let stdout = stdout_task.await.unwrap_or_default();
             let stderr = stderr_task.await.unwrap_or_default();
+            info!(
+                program = program, pid = pid,
+                stdout_bytes = stdout.len(), stderr_bytes = stderr.len(),
+                "AppContainer spawn: pipes drained"
+            );
             Ok(ReapResult::Completed { exit_code, stdout, stderr })
         }
-        Ok(Ok(Err(e))) => Ok(ReapResult::SpawnFailed(format!("wait error: {e}"))),
-        Ok(Err(e)) => Ok(ReapResult::SpawnFailed(format!("join error: {e}"))),
+        Ok(Ok(Err(e))) => {
+            error!(program = program, error = %e, "AppContainer spawn: wait error");
+            Ok(ReapResult::SpawnFailed(format!("wait error: {e}")))
+        }
+        Ok(Err(e)) => {
+            error!(program = program, error = %e, "AppContainer spawn: join error");
+            Ok(ReapResult::SpawnFailed(format!("join error: {e}")))
+        }
         Err(_) => {
-            warn!(program = program, "Sandboxed child timed out — killing");
+            warn!(
+                program = program, pid = pid, timeout_secs,
+                total_ms = spawn_start.elapsed().as_millis() as u64,
+                "AppContainer spawn: TIMED OUT — killing child"
+            );
             kill_process_handle(kill_h as std::os::windows::io::RawHandle);
             let stdout = stdout_task.await.unwrap_or_default();
             let stderr = stderr_task.await.unwrap_or_default();

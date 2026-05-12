@@ -494,8 +494,20 @@ def main():
 
                     cprint(C.MAGENTA, f"\n  ⚙ Calling tool: {C.BOLD}{tool_name}{C.RESET}{C.MAGENTA} {json.dumps(tool_args)}")
 
+                    # Capture stderr line count before the call.
+                    stderr_before = len(mcp._stderr_lines)
+
                     # Call via MCP.
                     result = mcp.call_tool(tool_name, tool_args)
+
+                    # Show server logs emitted during the tool call.
+                    new_stderr = mcp._stderr_lines[stderr_before:]
+                    if new_stderr:
+                        cprint(C.DIM, f"  📋 Server logs ({len(new_stderr)} lines):")
+                        for log_line in new_stderr[-15:]:
+                            # Truncate long lines.
+                            display = log_line[:140] + "..." if len(log_line) > 140 else log_line
+                            cprint(C.DIM, f"     {display}")
 
                     if "error" in result:
                         cprint(C.RED, f"  ✗ Error: {result['error']}")

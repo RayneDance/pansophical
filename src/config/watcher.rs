@@ -29,17 +29,30 @@ pub async fn watch_config(
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
     // Debounce: track the last reload time.
-    let debounce = Duration::from_millis(500);
+    let debounce = Duration::from_secs(2);
 
     // Start the filesystem watcher in a blocking thread.
     let watched_path = config_path.clone();
+    let config_file_name = config_path.file_name()
+        .unwrap_or_default()
+        .to_os_string();
     std::thread::spawn(move || {
         let rt_tx = tx;
+        let filter_name = config_file_name;
         let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if let Ok(event) = event {
                 match event.kind {
                     EventKind::Modify(_) | EventKind::Create(_) => {
-                        let _ = rt_tx.blocking_send(());
+                        // Only fire if the changed file is our config file.
+                        // The `notify` crate watches the parent directory, so
+                        // writes to audit.log, state.json, etc. also trigger
+                        // events. Filter them out to avoid reload spam.
+                        let is_config = event.paths.iter().any(|p| {
+                            p.file_name().is_some_and(|n| n == filter_name)
+                        });
+                        if is_config {
+                            let _ = rt_tx.blocking_send(());
+                        }
                     }
                     _ => {}
                 }

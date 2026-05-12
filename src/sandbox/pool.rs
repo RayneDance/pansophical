@@ -171,15 +171,27 @@ impl ContainerPool {
             let entries = self.entries.read().await;
             if let Some(entry) = entries.get(&key) {
                 entry.active_count.fetch_add(1, Ordering::Relaxed);
-                // Wait for grants to complete if not ready yet.
-                if !entry.is_ready.load(Ordering::Acquire) {
+                let ready = entry.is_ready.load(Ordering::Acquire);
+                info!(
+                    key = %key_id,
+                    sid = %entry.container.sid_string,
+                    active = entry.active_count.load(Ordering::Relaxed),
+                    ready,
+                    "Pool HIT — reusing existing container"
+                );
+                if !ready {
+                    info!(key = %key_id, "Waiting for initial grants to complete...");
                     entry.ready.notified().await;
+                    info!(key = %key_id, "Initial grants complete, proceeding");
                 }
                 return Ok(Arc::clone(entry));
             }
         }
 
         // Slow path: create new container.
+        info!(key = %key_id, read_count = read_paths.len(), write_count = write_paths.len(), "Pool MISS — creating new container");
+        let total_start = std::time::Instant::now();
+
         let container_name = key.container_name();
         let mut container = AppContainer::create_named(&container_name)
             .map_err(|e| format!("failed to create AppContainer: {e}"))?;
@@ -188,65 +200,93 @@ impl ContainerPool {
             key = %key_id,
             container = %container_name,
             sid = %container.sid_string,
-            "Created session-scoped AppContainer"
+            elapsed_ms = total_start.elapsed().as_millis() as u64,
+            "AppContainer profile created"
         );
 
-        // Run recursive grants.
+        // Run recursive grants — time each operation.
         let skip = self.skip_dirs.clone();
+        info!(skip_dirs = ?skip, "Skip directories for recursive walk");
         let mut granted: Vec<String> = Vec::new();
 
-        for path in read_paths {
+        for (i, path) in read_paths.iter().enumerate() {
             let clean = super::strip_glob_suffix(&path.display().to_string());
             let clean_path = Path::new(&clean);
             if clean_path.exists() {
-                info!(path = %clean, sid = %container.sid_string, "Granting recursive read access");
+                let t = std::time::Instant::now();
+                info!(path = %clean, index = i, "READ grant: starting recursive walk");
                 match super::windows::grant_recursive(
                     clean_path, &container.sid_string, false, &skip,
                 ) {
                     Ok(count) => {
-                        info!(path = %clean, count, "Recursive read grant complete");
+                        info!(
+                            path = %clean,
+                            count,
+                            elapsed_ms = t.elapsed().as_millis() as u64,
+                            "READ grant: recursive walk complete"
+                        );
                         granted.push(clean.clone());
                         container.track_granted_path(clean.clone());
                     }
-                    Err(e) => warn!(path = %clean, error = %e, "Failed recursive read grant"),
+                    Err(e) => warn!(path = %clean, error = %e, elapsed_ms = t.elapsed().as_millis() as u64, "READ grant: FAILED"),
                 }
-                // Grant traverse on ancestor directories (including drive root)
-                // so the container can actually reach this path.
+                // Grant traverse on ancestor directories.
+                let t2 = std::time::Instant::now();
+                info!(path = %clean, "READ grant: granting ancestor traverse");
                 if let Err(e) = super::windows::grant_path_and_ancestors(
                     clean_path, &container.sid_string,
                 ) {
-                    warn!(path = %clean, error = %e, "Failed to grant ancestor traverse for read path");
+                    warn!(path = %clean, error = %e, "READ grant: ancestor traverse FAILED");
+                } else {
+                    info!(path = %clean, elapsed_ms = t2.elapsed().as_millis() as u64, "READ grant: ancestor traverse complete");
                 }
             } else {
-                warn!(path = %clean, "Read path does not exist — skipping");
+                warn!(path = %clean, "READ grant: path does not exist — skipping");
             }
         }
 
-        for path in write_paths {
+        for (i, path) in write_paths.iter().enumerate() {
             let clean = super::strip_glob_suffix(&path.display().to_string());
             let clean_path = Path::new(&clean);
             if clean_path.exists() {
-                info!(path = %clean, sid = %container.sid_string, "Granting recursive write access");
+                let t = std::time::Instant::now();
+                info!(path = %clean, index = i, "WRITE grant: starting recursive walk");
                 match super::windows::grant_recursive(
                     clean_path, &container.sid_string, true, &skip,
                 ) {
                     Ok(count) => {
-                        info!(path = %clean, count, "Recursive write grant complete");
+                        info!(
+                            path = %clean,
+                            count,
+                            elapsed_ms = t.elapsed().as_millis() as u64,
+                            "WRITE grant: recursive walk complete"
+                        );
                         granted.push(clean.clone());
                         container.track_granted_path(clean.clone());
                     }
-                    Err(e) => warn!(path = %clean, error = %e, "Failed recursive write grant"),
+                    Err(e) => warn!(path = %clean, error = %e, elapsed_ms = t.elapsed().as_millis() as u64, "WRITE grant: FAILED"),
                 }
                 // Grant traverse on ancestor directories.
+                let t2 = std::time::Instant::now();
+                info!(path = %clean, "WRITE grant: granting ancestor traverse");
                 if let Err(e) = super::windows::grant_path_and_ancestors(
                     clean_path, &container.sid_string,
                 ) {
-                    warn!(path = %clean, error = %e, "Failed to grant ancestor traverse for write path");
+                    warn!(path = %clean, error = %e, "WRITE grant: ancestor traverse FAILED");
+                } else {
+                    info!(path = %clean, elapsed_ms = t2.elapsed().as_millis() as u64, "WRITE grant: ancestor traverse complete");
                 }
             } else {
-                warn!(path = %clean, "Write path does not exist — skipping");
+                warn!(path = %clean, "WRITE grant: path does not exist — skipping");
             }
         }
+
+        info!(
+            key = %key_id,
+            total_granted = granted.len(),
+            total_elapsed_ms = total_start.elapsed().as_millis() as u64,
+            "All grants complete — container ready"
+        );
 
         let entry = Arc::new(PoolEntry {
             container,
