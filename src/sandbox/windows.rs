@@ -1399,16 +1399,19 @@ pub mod appcontainer {
         let mut count = 0;
 
         // Grant on the directory itself.
+        // Note: do NOT check is_hardlink() for directories — on NTFS, directories
+        // always have nNumberOfLinks >= 2 (self + "."), so the check would
+        // incorrectly skip every directory.
         match open_for_security(dir) {
             Ok(handle) => {
-                if !is_hardlink(handle) {
-                    let _ = apply_ace_by_handle(handle, sid_ptr, sid_len, write);
-                    count += 1;
+                if let Err(e) = apply_ace_by_handle(handle, sid_ptr, sid_len, write) {
+                    tracing::warn!(path = %dir.display(), error = %e, "Failed to apply ACE on directory");
                 }
+                count += 1;
                 super::win32::CloseHandle(handle);
             }
             Err(e) => {
-                tracing::debug!(path = %dir.display(), error = %e, "Skipping directory (open failed)");
+                tracing::warn!(path = %dir.display(), error = %e, "Skipping directory (open failed)");
                 return Ok(0);
             }
         }
