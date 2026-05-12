@@ -120,8 +120,8 @@ pub unsafe fn configure_sandbox(cmd: &mut Command, profile: &SandboxProfile, den
             for path_str in &read_paths {
                 let path = Path::new(path_str);
                 if path.exists() {
-                    let os_str = path.as_os_str();
-                    let rules = path_beneath_rules(&[os_str], read_access);
+                    let paths = [path.as_os_str()];
+                    let rules = path_beneath_rules(&paths, read_access);
                     rs = match rs.add_rules(rules) {
                         Ok(r) => r,
                         Err(e) => {
@@ -135,8 +135,8 @@ pub unsafe fn configure_sandbox(cmd: &mut Command, profile: &SandboxProfile, den
             for path_str in &write_paths {
                 let path = Path::new(path_str);
                 if path.exists() {
-                    let os_str = path.as_os_str();
-                    let rules = path_beneath_rules(&[os_str], write_access);
+                    let paths = [path.as_os_str()];
+                    let rules = path_beneath_rules(&paths, write_access);
                     rs = match rs.add_rules(rules) {
                         Ok(r) => r,
                         Err(e) => {
@@ -150,8 +150,8 @@ pub unsafe fn configure_sandbox(cmd: &mut Command, profile: &SandboxProfile, den
             for path_str in &exec_paths {
                 let path = Path::new(path_str);
                 if path.exists() {
-                    let os_str = path.as_os_str();
-                    let rules = path_beneath_rules(&[os_str], exec_access);
+                    let paths = [path.as_os_str()];
+                    let rules = path_beneath_rules(&paths, exec_access);
                     rs = match rs.add_rules(rules) {
                         Ok(r) => r,
                         Err(e) => {
@@ -165,8 +165,8 @@ pub unsafe fn configure_sandbox(cmd: &mut Command, profile: &SandboxProfile, den
             // System paths always needed.
             for dev in &["/proc", "/dev/null", "/dev/urandom", "/dev/zero"] {
                 if Path::new(dev).exists() {
-                    let os_str = OsStr::new(dev);
-                    let rules = path_beneath_rules(&[os_str], read_access);
+                    let paths = [OsStr::new(dev)];
+                    let rules = path_beneath_rules(&paths, read_access);
                     rs = match rs.add_rules(rules) {
                         Ok(r) => r,
                         Err(_) => return Ok(()),
@@ -175,8 +175,8 @@ pub unsafe fn configure_sandbox(cmd: &mut Command, profile: &SandboxProfile, den
             }
             for rw in &["/dev/pts", "/tmp"] {
                 if Path::new(rw).exists() {
-                    let os_str = OsStr::new(rw);
-                    let rules = path_beneath_rules(&[os_str], write_access);
+                    let paths = [OsStr::new(rw)];
+                    let rules = path_beneath_rules(&paths, write_access);
                     rs = match rs.add_rules(rules) {
                         Ok(r) => r,
                         Err(_) => return Ok(()),
