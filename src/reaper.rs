@@ -174,21 +174,42 @@ fn build_env_vars(
         }
     }
 
+    // On Windows, ensure critical system variables are always present.
+    // Without these, CreateProcessW fails with ERROR_ENVVAR_NOT_FOUND (203)
+    // and many tools (cmd.exe, conhost, etc.) fail to initialize.
     #[cfg(windows)]
     {
-        if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("SYSTEMROOT"))
-            && let Ok(val) = std::env::var("SYSTEMROOT") {
-                vars.push(("SYSTEMROOT".into(), val));
-            }
-        if !sandbox_config.env_baseline.iter().any(|v| v.eq_ignore_ascii_case("COMSPEC"))
-            && let Ok(val) = std::env::var("COMSPEC") {
-                vars.push(("COMSPEC".into(), val));
-            }
+        let critical_vars = [
+            "SYSTEMROOT",       // Required by kernel32/ntdll — CreateProcessW fails without it
+            "COMSPEC",          // Required by cmd.exe
+            "windir",           // Referenced by many Windows internals
+            "SYSTEMDRIVE",      // e.g. "C:" — used by shell commands
+            "TEMP",             // Required by many tools for temp file creation
+            "TMP",              // Alias for TEMP
+            "PATHEXT",          // Required by cmd.exe for command resolution (.exe, .cmd, etc.)
+            "USERPROFILE",      // Used by tools that reference ~ or $HOME
+            "APPDATA",          // Required by many apps for config storage
+            "LOCALAPPDATA",     // Required by many apps for local cache
+            "PROGRAMDATA",      // System-wide program data
+            "NUMBER_OF_PROCESSORS",  // Used by build tools for parallelism
+            "PROCESSOR_ARCHITECTURE", // Used for architecture detection
+            "OS",               // "Windows_NT"
+        ];
+
+        for name in &critical_vars {
+            let already = vars.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
+            if !already
+                && let Ok(val) = std::env::var(name) {
+                    vars.push((name.to_string(), val));
+                }
+        }
     }
 
     for (k, v) in granted_env {
         vars.push((k.clone(), v.clone()));
     }
+
+    info!(env_count = vars.len(), keys = ?vars.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), "Built child environment");
 
     vars
 }

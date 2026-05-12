@@ -685,7 +685,7 @@ pub mod appcontainer {
 
     const SE_FILE_OBJECT: u32 = 1;
     const DACL_SECURITY_INFORMATION: u32 = 0x00000004;
-    const UNPROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x20000000;
+
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
     #[allow(dead_code)]
     const GENERIC_READ: u32 = 0x80000000;
@@ -1089,12 +1089,12 @@ pub mod appcontainer {
                 // Add the new ACE
                 AddAce(new_acl, 2, 0xFFFFFFFF, ace_buf, ace_size as u32);
 
-                // 8. Apply the new DACL (UNPROTECTED preserves inherited ACEs)
+                // 8. Apply the new DACL
                 let mut path_wide_mut = path_wide;
                 let result = SetNamedSecurityInfoW(
                     path_wide_mut.as_mut_ptr(),
                     SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                    DACL_SECURITY_INFORMATION,
                     ptr::null(), ptr::null(),
                     new_acl,
                     ptr::null(),
@@ -1231,7 +1231,7 @@ pub mod appcontainer {
             // Apply via handle (TOCTOU-safe).
             let result = SetSecurityInfo(
                 handle, SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                DACL_SECURITY_INFORMATION,
                 ptr::null(), ptr::null(), new_acl, ptr::null(),
             );
 
@@ -1631,7 +1631,7 @@ pub mod appcontainer {
             if changed {
                 SetSecurityInfo(
                     handle, SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                    DACL_SECURITY_INFORMATION,
                     ptr::null(), ptr::null(), new_acl, ptr::null(),
                 );
             }
