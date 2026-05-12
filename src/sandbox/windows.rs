@@ -1369,19 +1369,19 @@ pub mod appcontainer {
         sid_string: &str,
     ) -> Result<(), String> {
         // Grant on the target itself.
+        tracing::info!(path = %path.display(), "Granting AppContainer access to target");
         grant_file(path, sid_string, false)?;
 
-        // Walk up and grant read on each ancestor directory.
+        // Walk up and grant read on each ancestor directory, INCLUDING
+        // drive roots (e.g. "E:\"). Without an ACE on the drive root,
+        // the AppContainer cannot traverse to anything on that volume.
         let mut current = path.parent();
         while let Some(dir) = current {
-            // Stop at drive roots (e.g. "E:\") or filesystem root.
-            if dir.parent().is_none() {
-                break;
-            }
-            // Grant read (not write) on each ancestor.
+            tracing::info!(path = %dir.display(), "Granting AppContainer traverse on ancestor");
             if let Err(e) = grant_file(dir, sid_string, false) {
-                tracing::debug!(path = %dir.display(), error = %e, "Failed to grant ancestor traverse");
-                // Don't fail hard — ancestor may already have a suitable ACE.
+                tracing::warn!(path = %dir.display(), error = %e, "Failed to grant ancestor traverse (may already have access)");
+                // Don't fail hard — ancestor may already have a suitable ACE
+                // (e.g. drive root owned by SYSTEM may require admin).
                 break;
             }
             current = dir.parent();

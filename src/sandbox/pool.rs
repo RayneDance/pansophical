@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(windows)]
 use tokio::sync::{Notify, RwLock};
 #[cfg(windows)]
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 #[cfg(windows)]
 use super::windows::AppContainer;
@@ -199,16 +199,26 @@ impl ContainerPool {
             let clean = super::strip_glob_suffix(&path.display().to_string());
             let clean_path = Path::new(&clean);
             if clean_path.exists() {
+                info!(path = %clean, sid = %container.sid_string, "Granting recursive read access");
                 match super::windows::grant_recursive(
                     clean_path, &container.sid_string, false, &skip,
                 ) {
                     Ok(count) => {
-                        debug!(path = %clean, count, "Granted read access recursively");
+                        info!(path = %clean, count, "Recursive read grant complete");
                         granted.push(clean.clone());
-                        container.track_granted_path(clean);
+                        container.track_granted_path(clean.clone());
                     }
                     Err(e) => warn!(path = %clean, error = %e, "Failed recursive read grant"),
                 }
+                // Grant traverse on ancestor directories (including drive root)
+                // so the container can actually reach this path.
+                if let Err(e) = super::windows::grant_path_and_ancestors(
+                    clean_path, &container.sid_string,
+                ) {
+                    warn!(path = %clean, error = %e, "Failed to grant ancestor traverse for read path");
+                }
+            } else {
+                warn!(path = %clean, "Read path does not exist — skipping");
             }
         }
 
@@ -216,16 +226,25 @@ impl ContainerPool {
             let clean = super::strip_glob_suffix(&path.display().to_string());
             let clean_path = Path::new(&clean);
             if clean_path.exists() {
+                info!(path = %clean, sid = %container.sid_string, "Granting recursive write access");
                 match super::windows::grant_recursive(
                     clean_path, &container.sid_string, true, &skip,
                 ) {
                     Ok(count) => {
-                        debug!(path = %clean, count, "Granted write access recursively");
+                        info!(path = %clean, count, "Recursive write grant complete");
                         granted.push(clean.clone());
-                        container.track_granted_path(clean);
+                        container.track_granted_path(clean.clone());
                     }
                     Err(e) => warn!(path = %clean, error = %e, "Failed recursive write grant"),
                 }
+                // Grant traverse on ancestor directories.
+                if let Err(e) = super::windows::grant_path_and_ancestors(
+                    clean_path, &container.sid_string,
+                ) {
+                    warn!(path = %clean, error = %e, "Failed to grant ancestor traverse for write path");
+                }
+            } else {
+                warn!(path = %clean, "Write path does not exist — skipping");
             }
         }
 

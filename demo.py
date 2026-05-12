@@ -288,26 +288,31 @@ def call_vertex(project, access_token, messages, tools_decl):
 
 
 def extract_response(vertex_resp):
-    """Extract text, function calls, and raw parts from a Vertex response.
+    """Extract text, function calls, thoughts, and raw parts from a Vertex response.
 
-    Returns (text, func_calls, raw_parts) where raw_parts preserves any
+    Returns (text, func_calls, thoughts, raw_parts) where raw_parts preserves any
     opaque fields like ``thoughtSignature`` needed for round-tripping.
     """
     candidates = vertex_resp.get("candidates", [])
     if not candidates:
-        return None, [], []
+        return None, [], [], []
 
     parts = candidates[0].get("content", {}).get("parts", [])
     text_parts = []
+    thought_parts = []
     func_calls = []
 
     for part in parts:
-        if "text" in part and not part.get("thought"):
-            text_parts.append(part["text"])
+        if "text" in part:
+            if part.get("thought"):
+                thought_parts.append(part["text"])
+            else:
+                text_parts.append(part["text"])
         if "functionCall" in part:
             func_calls.append(part["functionCall"])
 
-    return "\n".join(text_parts) if text_parts else None, func_calls, parts
+    thoughts = "\n".join(thought_parts) if thought_parts else None
+    return "\n".join(text_parts) if text_parts else None, func_calls, thoughts, parts
 
 # ── Main Loop ──────────────────────────────────────────────────────────────
 
@@ -445,7 +450,17 @@ def main():
                     cprint(C.RED, f"\n  Vertex error: {e}")
                     break
 
-                text, func_calls, raw_parts = extract_response(vertex_resp)
+                text, func_calls, thoughts, raw_parts = extract_response(vertex_resp)
+
+                # Show thinking output if present.
+                if thoughts:
+                    print()
+                    cprint(C.DIM, "  🧠 Thinking:")
+                    for line in thoughts.split("\n"):
+                        # Truncate very long thought lines.
+                        if len(line) > 120:
+                            line = line[:117] + "..."
+                        cprint(C.DIM, f"     {line}")
 
                 if not func_calls:
                     # No tool calls — show the text response.
