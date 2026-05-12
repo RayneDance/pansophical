@@ -1174,6 +1174,28 @@ pub mod appcontainer {
                     std::mem::size_of::<AclSizeInformation>() as u32,
                     2, // AclSizeInformation
                 );
+
+                // Check if the SID already has an ACE with adequate access.
+                // This avoids the extremely expensive SetSecurityInfo call on
+                // drive roots (50+ seconds per call) when the ACE already exists.
+                for i in 0..acl_info.AceCount {
+                    let mut ace_ptr: *mut c_void = ptr::null_mut();
+                    if GetAce(existing_dacl, i, &mut ace_ptr) != 0 {
+                        let header = &*(ace_ptr as *const AceHeader);
+                        if header.AceType == ACCESS_ALLOWED_ACE_TYPE {
+                            let existing_ace = &*(ace_ptr as *const AccessAllowedAce);
+                            let ace_sid = &existing_ace.SidStart as *const u32 as *mut c_void;
+                            if EqualSid(ace_sid, sid_ptr) != 0
+                                && (existing_ace.Mask & access_mask) == access_mask
+                            {
+                                // ACE already exists with required permissions — skip.
+                                tracing::debug!("ACE already exists — skipping SetSecurityInfo");
+                                LocalFree(sd);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
             }
 
             // Build new ACE.
