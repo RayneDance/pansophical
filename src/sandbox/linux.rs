@@ -57,136 +57,148 @@ pub unsafe fn configure_sandbox(cmd: &mut Command, profile: &SandboxProfile, den
         .map(|p| strip_glob_suffix(p).display().to_string())
         .collect();
 
-    cmd.pre_exec(move || {
-        // 1. Set PR_SET_PDEATHSIG so child is killed when parent dies.
-        let ret = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-        if ret != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        // Check if parent already died (race between fork and prctl).
-        if libc::getppid() == 1 {
-            libc::_exit(1);
-        }
-
-        // 2. Apply Landlock restrictions.
-        let read_access = AccessFs::from_read(TARGET_ABI);
-        let write_access = AccessFs::from_all(TARGET_ABI);
-        let exec_access = read_access | AccessFs::Execute;
-
-        // Declare which access types we handle. Declaring an access type
-        // without adding rules for it means ALL such access is denied.
-        let mut rs_builder = match Ruleset::default()
-            .handle_access(AccessFs::from_all(TARGET_ABI))
-        {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("pansophical: landlock fs handle_access failed: {e}");
-                return Ok(());
+    // SAFETY: pre_exec runs in the child after fork(). All operations here
+    // are async-signal-safe (syscalls via libc, landlock ioctls).
+    unsafe {
+        cmd.pre_exec(move || {
+            // 1. Set PR_SET_PDEATHSIG so child is killed when parent dies.
+            let ret = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error());
             }
-        };
 
-        // 3. Network deny: handle TCP access types without adding any
-        //    allow rules → all TCP bind + connect is denied.
-        if deny_network {
-            match rs_builder.handle_access(AccessNet::BindTcp | AccessNet::ConnectTcp) {
-                Ok(r) => rs_builder = r,
+            // Check if parent already died (race between fork and prctl).
+            if unsafe { libc::getppid() } == 1 {
+                unsafe { libc::_exit(1) };
+            }
+
+            // 2. Apply Landlock restrictions.
+            let read_access = AccessFs::from_read(TARGET_ABI);
+            let write_access = AccessFs::from_all(TARGET_ABI);
+            let exec_access = read_access | AccessFs::Execute;
+
+            // Declare which access types we handle. Declaring an access type
+            // without adding rules for it means ALL such access is denied.
+            let rs_builder = match Ruleset::default()
+                .handle_access(AccessFs::from_all(TARGET_ABI))
+            {
+                Ok(r) => r,
                 Err(e) => {
-                    // Network rules may fail on pre-6.7 kernels — not fatal.
-                    eprintln!("pansophical: landlock net deny not available: {e}");
+                    eprintln!("pansophical: landlock fs handle_access failed: {e}");
+                    return Ok(());
+                }
+            };
+
+            // 3. Network deny: handle TCP access types without adding any
+            //    allow rules → all TCP bind + connect is denied.
+            let rs_builder = if deny_network {
+                match rs_builder.handle_access(AccessNet::BindTcp | AccessNet::ConnectTcp) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // Network rules may fail on pre-6.7 kernels — not fatal.
+                        eprintln!("pansophical: landlock net deny not available: {e}");
+                        return Ok(());
+                    }
+                }
+            } else {
+                rs_builder
+            };
+
+            let ruleset = match rs_builder.create() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("pansophical: landlock create failed: {e}");
+                    return Ok(());
+                }
+            };
+
+            // Collect all paths into (path, access) pairs, then add them
+            // in a single chain. add_rules() takes self by value, so we
+            // must thread the ruleset through each call.
+            let mut rs = ruleset;
+
+            for path_str in &read_paths {
+                let path = Path::new(path_str);
+                if path.exists() {
+                    let os_str = path.as_os_str();
+                    let rules = path_beneath_rules(&[os_str], read_access);
+                    rs = match rs.add_rules(rules) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("pansophical: landlock read rule '{}': {e}", path_str);
+                            return Ok(());
+                        }
+                    };
                 }
             }
-        }
 
-        let ruleset = match rs_builder.create() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("pansophical: landlock create failed: {e}");
-                return Ok(());
-            }
-        };
-
-        // Collect all paths into (path, access) pairs, then add them
-        // in a single chain. add_rules() takes self by value, so we
-        // must thread the ruleset through each call.
-        let mut rs = ruleset;
-
-        for path_str in &read_paths {
-            let path = Path::new(path_str);
-            if path.exists() {
-                let rules = path_beneath_rules(&[path.as_os_str()], read_access);
-                rs = match rs.add_rules(rules) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("pansophical: landlock read rule '{}': {e}", path_str);
-                        return Ok(());
-                    }
-                };
-            }
-        }
-
-        for path_str in &write_paths {
-            let path = Path::new(path_str);
-            if path.exists() {
-                let rules = path_beneath_rules(&[path.as_os_str()], write_access);
-                rs = match rs.add_rules(rules) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("pansophical: landlock write rule '{}': {e}", path_str);
-                        return Ok(());
-                    }
-                };
-            }
-        }
-
-        for path_str in &exec_paths {
-            let path = Path::new(path_str);
-            if path.exists() {
-                let rules = path_beneath_rules(&[path.as_os_str()], exec_access);
-                rs = match rs.add_rules(rules) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("pansophical: landlock exec rule '{}': {e}", path_str);
-                        return Ok(());
-                    }
-                };
-            }
-        }
-
-        // System paths always needed.
-        for dev in &["/proc", "/dev/null", "/dev/urandom", "/dev/zero"] {
-            if Path::new(dev).exists() {
-                let rules = path_beneath_rules(&[OsStr::new(dev)], read_access);
-                rs = match rs.add_rules(rules) {
-                    Ok(r) => r,
-                    Err(_) => return Ok(()),
-                };
-            }
-        }
-        for rw in &["/dev/pts", "/tmp"] {
-            if Path::new(rw).exists() {
-                let rules = path_beneath_rules(&[OsStr::new(rw)], write_access);
-                rs = match rs.add_rules(rules) {
-                    Ok(r) => r,
-                    Err(_) => return Ok(()),
-                };
-            }
-        }
-
-        // Enforce.
-        match rs.restrict_self() {
-            Ok(status) => {
-                if status.ruleset == RulesetStatus::NotEnforced {
-                    eprintln!("pansophical: landlock not enforced (kernel too old?)");
+            for path_str in &write_paths {
+                let path = Path::new(path_str);
+                if path.exists() {
+                    let os_str = path.as_os_str();
+                    let rules = path_beneath_rules(&[os_str], write_access);
+                    rs = match rs.add_rules(rules) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("pansophical: landlock write rule '{}': {e}", path_str);
+                            return Ok(());
+                        }
+                    };
                 }
             }
-            Err(e) => {
-                eprintln!("pansophical: landlock restrict_self failed: {e}");
-            }
-        }
 
-        Ok(())
-    });
+            for path_str in &exec_paths {
+                let path = Path::new(path_str);
+                if path.exists() {
+                    let os_str = path.as_os_str();
+                    let rules = path_beneath_rules(&[os_str], exec_access);
+                    rs = match rs.add_rules(rules) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("pansophical: landlock exec rule '{}': {e}", path_str);
+                            return Ok(());
+                        }
+                    };
+                }
+            }
+
+            // System paths always needed.
+            for dev in &["/proc", "/dev/null", "/dev/urandom", "/dev/zero"] {
+                if Path::new(dev).exists() {
+                    let os_str = OsStr::new(dev);
+                    let rules = path_beneath_rules(&[os_str], read_access);
+                    rs = match rs.add_rules(rules) {
+                        Ok(r) => r,
+                        Err(_) => return Ok(()),
+                    };
+                }
+            }
+            for rw in &["/dev/pts", "/tmp"] {
+                if Path::new(rw).exists() {
+                    let os_str = OsStr::new(rw);
+                    let rules = path_beneath_rules(&[os_str], write_access);
+                    rs = match rs.add_rules(rules) {
+                        Ok(r) => r,
+                        Err(_) => return Ok(()),
+                    };
+                }
+            }
+
+            // Enforce.
+            match rs.restrict_self() {
+                Ok(status) => {
+                    if status.ruleset == RulesetStatus::NotEnforced {
+                        eprintln!("pansophical: landlock not enforced (kernel too old?)");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("pansophical: landlock restrict_self failed: {e}");
+                }
+            }
+
+            Ok(())
+        });
+    }
 }
 
 /// Strip glob suffix (`/**`) from a path for Landlock rules.
