@@ -27,7 +27,7 @@ MCP gives agents access to your filesystem, shell, and APIs. Most MCP servers tr
 - **Windows AppContainer** (primary) — strongest Windows isolation; denies all filesystem and network access by default, only explicitly granted paths are accessible via handle-based ACE grants. Session-scoped container pooling amortizes the grant cost across tool calls
 - **Windows Low Integrity** (fallback) — restricted token with Low integrity level; used when AppContainer fails to initialize
 - **Linux Landlock** (kernel 5.13+) — path-based filesystem restrictions via `pre_exec` hook; read, write, and execute paths enforced from `SandboxProfile`
-- **Network deny** — TCP bind + connect blocked via Landlock V5 (kernel 6.7+) on Linux; AppContainer on Windows
+- **Network deny** — TCP bind + connect blocked via Landlock V5 (kernel 6.7+) on Linux; AppContainer on Windows. **Known gap:** on Linux kernels < 6.7, network deny silently degrades — child processes retain full network access. The server logs a warning when this occurs. A seccomp-bpf fallback could close this gap on older kernels but is not yet implemented
 - **PR_SET_PDEATHSIG** — child processes are killed if the server dies (Linux)
 - **Job Objects** — `KILL_ON_JOB_CLOSE` prevents orphaned child processes (Windows)
 - **Environment stripping** — child processes start with an empty environment; only `env_baseline` vars are passed
