@@ -371,18 +371,39 @@ impl McpTool for ScriptTool {
                 let output = String::from_utf8_lossy(&stdout).to_string();
                 let err_output = String::from_utf8_lossy(&stderr).to_string();
 
+                // Always log stderr if non-empty, even on success.
+                if !err_output.is_empty() {
+                    tracing::warn!(
+                        tool = %self.def.name,
+                        exit_code = ?exit_code,
+                        stderr = %err_output,
+                        "Tool produced stderr output"
+                    );
+                }
+
                 if exit_code == Some(0) {
+                    // Include stderr in the response if present, so the LLM
+                    // (and user) can see diagnostics even on successful exit.
+                    let text = if err_output.is_empty() {
+                        output
+                    } else {
+                        format!("{output}\n\n--- stderr ---\n{err_output}")
+                    };
                     Ok(json!({
-                        "content": [{"type": "text", "text": output}],
+                        "content": [{"type": "text", "text": text}],
                         "isError": false,
                     }))
                 } else {
                     let code = exit_code.map_or("unknown".to_string(), |c| c.to_string());
-                    let combined = if err_output.is_empty() {
-                        format!("exit code {code}: {output}")
-                    } else {
-                        format!("exit code {code}: {err_output}")
-                    };
+                    // Show both stdout and stderr on failure.
+                    let combined = format!(
+                        "exit code {code}\n--- stdout ---\n{output}\n--- stderr ---\n{err_output}"
+                    );
+                    tracing::warn!(
+                        tool = %self.def.name,
+                        exit_code = code,
+                        "Tool exited with non-zero code"
+                    );
                     Ok(json!({
                         "content": [{"type": "text", "text": combined}],
                         "isError": true,
@@ -390,9 +411,11 @@ impl McpTool for ScriptTool {
                 }
             }
             crate::reaper::ReapResult::TimedOut { .. } => {
+                tracing::error!(tool = %self.def.name, "Tool execution timed out");
                 Err("tool execution timed out".into())
             }
             crate::reaper::ReapResult::SpawnFailed(e) => {
+                tracing::error!(tool = %self.def.name, error = %e, "Tool spawn failed");
                 Err(format!("failed to spawn '{}': {e}", self.def.command))
             }
         }
