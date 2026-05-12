@@ -24,8 +24,8 @@ MCP gives agents access to your filesystem, shell, and APIs. Most MCP servers tr
 - **Auto-deny on timeout** — unconfirmed requests are denied after the configured timeout
 
 ### Sandboxing
-- **Windows AppContainer** (primary) — strongest Windows isolation; denies all filesystem and network access by default, only explicitly granted paths are accessible via `icacls` ACE grants
-- **Windows Low Integrity** (fallback) — restricted token with Low integrity level
+- **Windows AppContainer** (primary) — strongest Windows isolation; denies all filesystem and network access by default, only explicitly granted paths are accessible via handle-based ACE grants. Session-scoped container pooling amortizes the grant cost across tool calls
+- **Windows Low Integrity** (fallback) — restricted token with Low integrity level; used when AppContainer fails to initialize
 - **Linux Landlock** (kernel 5.13+) — path-based filesystem restrictions via `pre_exec` hook; read, write, and execute paths enforced from `SandboxProfile`
 - **Network deny** — TCP bind + connect blocked via Landlock V5 (kernel 6.7+) on Linux; AppContainer on Windows
 - **PR_SET_PDEATHSIG** — child processes are killed if the server dies (Linux)
@@ -225,15 +225,19 @@ Agent request
 
 | Platform | Primary | Fallback | Network |
 |----------|---------|----------|---------|
-| **Windows** | AppContainer (deny-all + explicit ACEs via `icacls /T`) | Low Integrity restricted token | AppContainer denies by default |
+| **Windows** | AppContainer (deny-all + handle-based ACEs) | Low Integrity restricted token | AppContainer denies by default |
 | **Linux** | Landlock V5 (filesystem + network) | Unsandboxed (if `allow_fallback = true`) | Landlock `AccessNet` deny (kernel 6.7+) |
 
+> **⚠️ Windows sandbox status:** AppContainer isolation is functional and tested on Windows 10/11. Handle-based ACL grants, session pooling, and container cleanup all work correctly. However, the implementation has not been security-audited and should not be considered hardened.
+
 **Windows AppContainer details:**
-- Each tool invocation creates an ephemeral AppContainer profile with a unique SID
-- Filesystem access is granted via `icacls /grant *SID:(OI)(CI)(perms) /T` for recursive propagation
+- A **session-scoped container pool** creates one AppContainer per API key and reuses it across all tool calls for that session, eliminating per-call ACE pollution and amortizing grant cost
+- Filesystem access is granted via **handle-based `SetSecurityInfo`** (TOCTOU-safe) — not `icacls`. Each file/directory receives a non-inheriting ACE with the container's SID
+- ACE existence checks skip `SetSecurityInfo` when the SID already has adequate permissions, avoiding the 50+ second penalty on drive roots
+- Ancestor directories up to the drive root receive traverse ACEs so the container can resolve paths
 - System directories (`System32`, `SysWOW64`) are already accessible via the built-in `ALL APPLICATION PACKAGES` ACE — no explicit grants needed
-- Directory traversal works without ancestor grants because `SeChangeNotifyPrivilege` (BYPASS_TRAVERSE_CHECKING) is enabled by default
-- The container profile and all ACEs are cleaned up on drop
+- Critical Windows system environment variables (`SYSTEMROOT`, `windir`, `TEMP`, `PATHEXT`, etc.) are always included in the child environment block
+- The container profile and all ACEs are cleaned up on shutdown via the pool's `Drop` implementation and orphan cleanup on restart
 
 Both platforms: Job Object / `PR_SET_PDEATHSIG` kills children if the server dies. Environment is stripped to `env_baseline` only.
 
@@ -286,6 +290,7 @@ src/
 ├── confirm/             # HITL confirmation (HMAC tokens, browser UI, session cache)
 ├── sandbox/
 │   ├── mod.rs           # SandboxProfile, cross-platform interface, glob stripping
+│   ├── pool.rs          # Session-scoped AppContainer pool with orphan cleanup
 │   ├── windows.rs       # AppContainer + Low IL restricted token + Win32 security FFI
 │   └── linux.rs         # Landlock + PR_SET_PDEATHSIG
 ├── reaper.rs            # Process spawning, timeout, output caps, sandbox diagnostics
