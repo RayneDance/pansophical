@@ -453,11 +453,18 @@ async fn handle_tools_call(
                 // Without this, the AppContainer denies access at the OS level
                 // even though the authz cache approved the resource.
                 for req in &resource_requests {
-                    let path = std::path::PathBuf::from(&req.resource);
-                    if req.perm.contains(crate::config::perm::Perm::WRITE) {
-                        sandbox_profile.write_paths.push(path);
-                    } else {
-                        sandbox_profile.read_paths.push(path);
+                    match req.target_type {
+                        crate::config::policy_target::PolicyTargetType::Network => {
+                            sandbox_profile.allow_network = true;
+                        }
+                        _ => {
+                            let path = std::path::PathBuf::from(&req.resource);
+                            if req.perm.contains(crate::config::perm::Perm::WRITE) {
+                                sandbox_profile.write_paths.push(path);
+                            } else {
+                                sandbox_profile.read_paths.push(path);
+                            }
+                        }
                     }
                 }
 
