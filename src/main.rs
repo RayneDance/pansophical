@@ -26,9 +26,13 @@ struct Cli {
     #[arg(long, default_value = "config.toml")]
     config: PathBuf,
 
-    /// Generate a new config.toml with a random server_secret, then exit.
+    /// Generate a minimal config.toml with a random server_secret, then exit.
     #[arg(long)]
     init: bool,
+
+    /// Set up a full demo environment with AST tools, scoped key, and system prompt.
+    #[arg(long)]
+    demo: bool,
 
     /// Validate the config file and exit with 0 (valid) or 1 (invalid).
     #[arg(long)]
@@ -50,6 +54,8 @@ fn main() {
 
     let result = if cli.init {
         run_init(&cli.config)
+    } else if cli.demo {
+        run_demo(&cli.config)
     } else if cli.check {
         run_check(&cli.config)
     } else {
@@ -62,11 +68,11 @@ fn main() {
     }
 }
 
-/// `--init`: Generate a well-commented config.toml with a random server_secret.
+/// `--init`: Generate a minimal config.toml with a random server_secret.
+///
+/// Creates only the config file and an empty tools/ directory.
+/// For a full demo setup with AST tools, use `--demo` instead.
 fn run_init(path: &Path) -> Result<()> {
-    use base64::Engine;
-    use rand::RngCore;
-
     if path.exists() {
         return Err(PansophicalError::Config(format!(
             "config file already exists: {}. Remove it first or use a different path with --config.",
@@ -74,109 +80,114 @@ fn run_init(path: &Path) -> Result<()> {
         )));
     }
 
-    // Generate a 32-byte random secret, base64-encoded.
-    let mut secret_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut secret_bytes);
-    let server_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret_bytes);
-
-    // Generate a random demo API token.
-    let mut token_bytes = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut token_bytes);
-    let demo_token = format!("sk_demo_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes));
-
+    let (server_secret, demo_token) = generate_secrets();
     let config_content = generate_default_config(&server_secret, &demo_token);
 
     std::fs::write(path, config_content)?;
     info!("Config written to: {}", path.display());
-    info!("Server secret generated (base64). Keep this value safe.");
+    info!("Demo token: {demo_token}");
 
-    // Create the tools/ directory and populate with examples.
-    let tools_dir = path.parent().unwrap_or(std::path::Path::new(".")).join("tools");
+    // Create the tools/ directory (empty — user adds tools as needed).
+    let tools_dir = path.parent().unwrap_or(Path::new(".")).join("tools");
     if !tools_dir.exists() {
         std::fs::create_dir_all(&tools_dir)?;
         info!("Created tools directory: {}", tools_dir.display());
     }
 
-    write_example_tools(&tools_dir)?;
-
-    info!("Initialization complete. Run `pansophical` to start the server.");
+    info!("");
+    info!("Initialization complete.");
+    info!("  Start server:   pansophical");
+    info!("  Full demo:      pansophical --demo");
+    info!("  Validate:       pansophical --check");
     Ok(())
 }
 
-/// Write example script tool definitions into the tools directory.
-fn write_example_tools(tools_dir: &std::path::Path) -> Result<()> {
-    let examples: &[(&str, &str)] = &[
-        ("hello_world.toml", r#"# ══════════════════════════════════════════════════════════════
-# Example: Hello World
-# ══════════════════════════════════════════════════════════════
-# A minimal script tool that echoes a greeting.
-# Demonstrates basic parameter passing and shell usage.
+/// `--demo`: Set up a full demo environment showcasing best practices.
+///
+/// Creates:
+/// - config.toml with a scoped coding_agent key
+/// - tools/ directory populated with AST tools + web search
+/// - system_prompt.md for Vertex AI integration
+fn run_demo(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Err(PansophicalError::Config(format!(
+            "config file already exists: {}. Remove it first or use a different path with --config.",
+            path.display()
+        )));
+    }
 
-name        = "hello_world"
-description = "Say hello to someone"
-command     = "echo"
-args        = ["Hello,"]
-allow_shell = false
+    let (server_secret, agent_token) = generate_secrets();
 
-# Parameters are appended to args when the agent calls the tool.
-[[parameters]]
-name        = "name"
-description = "Name to greet"
-required    = true
-"#),
-        ("git_status.toml", r#"# ══════════════════════════════════════════════════════════════
-# Example: Git Status
-# ══════════════════════════════════════════════════════════════
-# Reports git status for a specific directory.
-# Uses {path} interpolation to place the argument in the right position.
+    // Detect the current working directory for scoped filesystem grants.
+    let workspace = std::env::current_dir()
+        .map(|p| p.display().to_string().replace('\\', "/"))
+        .unwrap_or_else(|_| ".".to_string());
 
-group           = "devops"
-name            = "git_status"
-description     = "Show git status for a directory"
-command         = "git"
-args            = ["-C", "{path}", "status", "--short"]
-allow_shell     = false
-arg_passthrough = false
+    let config_content = generate_demo_config(&server_secret, &agent_token, &workspace);
+    std::fs::write(path, &config_content)?;
+    info!("Config written to: {}", path.display());
 
-# The {path} placeholder above is replaced with this parameter's value.
-# Without interpolation, parameters are appended at the end.
-[[parameters]]
-name        = "path"
-description = "Directory to check (absolute path)"
-required    = true
-"#),
-        ("disk_usage.toml", r#"# ══════════════════════════════════════════════════════════════
-# Example: Disk Usage
-# ══════════════════════════════════════════════════════════════
-# Reports disk usage for the current directory.
-# Demonstrates a tool with no parameters (fixed command).
+    // Create and populate tools/.
+    let tools_dir = path.parent().unwrap_or(Path::new(".")).join("tools");
+    if !tools_dir.exists() {
+        std::fs::create_dir_all(&tools_dir)?;
+    }
+    write_demo_tools(&tools_dir)?;
 
-name            = "disk_usage"
-description     = "Show disk usage summary for the working directory"
-command         = "du"
-args            = ["-sh", "."]
-allow_shell     = false
-arg_passthrough = false
-"#),
-        ("list_processes.toml", r#"# ══════════════════════════════════════════════════════════════
-# Example: List Processes (Windows)
-# ══════════════════════════════════════════════════════════════
-# Lists running processes. Uses cmd.exe, so allow_shell = true.
-# This is an example of explicitly opting into shell access.
+    // Write the system prompt.
+    let prompt_path = path.parent().unwrap_or(Path::new(".")).join("system_prompt.md");
+    if !prompt_path.exists() {
+        std::fs::write(&prompt_path, DEMO_SYSTEM_PROMPT)?;
+        info!("  Created system_prompt.md");
+    }
 
-name        = "list_processes"
-description = "List running processes (Windows)"
-command     = "cmd"
-args        = ["/C", "tasklist", "/FO", "TABLE"]
-allow_shell = true
-"#),
+    info!("");
+    info!("Demo setup complete!");
+    info!("  Workspace:     {workspace}");
+    info!("  Agent token:   {agent_token}");
+    info!("  AST tools:     8 tools in the 'ast' group");
+    info!("  Web search:    ext_web_search (DuckDuckGo)");
+    info!("");
+    info!("  Start server:  pansophical");
+    info!("  Validate:      pansophical --check");
+    Ok(())
+}
+
+/// Generate cryptographically random server secret and API token.
+fn generate_secrets() -> (String, String) {
+    use base64::Engine;
+    use rand::RngCore;
+
+    let mut secret_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret_bytes);
+    let server_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret_bytes);
+
+    let mut token_bytes = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut token_bytes);
+    let token = format!("sk_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes));
+
+    (server_secret, token)
+}
+
+/// Write demo tool definitions — AST tools + web search.
+fn write_demo_tools(tools_dir: &Path) -> Result<()> {
+    let tools: &[(&str, &str)] = &[
+        ("ast_map.toml", include_str!("../tools/ast_map.toml")),
+        ("ast_show.toml", include_str!("../tools/ast_show.toml")),
+        ("ast_digest.toml", include_str!("../tools/ast_digest.toml")),
+        ("ast_search.toml", include_str!("../tools/ast_search.toml")),
+        ("ast_callees.toml", include_str!("../tools/ast_callees.toml")),
+        ("ast_callers.toml", include_str!("../tools/ast_callers.toml")),
+        ("ast_implements.toml", include_str!("../tools/ast_implements.toml")),
+        ("ast_reverse_deps.toml", include_str!("../tools/ast_reverse_deps.toml")),
+        ("web_search.toml", include_str!("../tools/web_search.toml")),
     ];
 
-    for (filename, content) in examples {
+    for (filename, content) in tools {
         let file_path = tools_dir.join(filename);
         if !file_path.exists() {
             std::fs::write(&file_path, content)?;
-            info!("  Created example: tools/{}", filename);
+            info!("  Created tools/{filename}");
         }
     }
 
@@ -596,9 +607,189 @@ var_pattern = "HOSTNAME"
 # type       = "program"
 # executable = "git"
 # confirm    = true
+\"##
+    )
+}
+
+/// Generate a demo config.toml with scoped grants and AST tool showcase.
+fn generate_demo_config(server_secret: &str, agent_token: &str, workspace: &str) -> String {
+    format!(
+        r##"# ══════════════════════════════════════════════════════════════════════════════
+# Pansophical — Demo Configuration (generated by --demo)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# This config demonstrates best practices for a coding agent setup:
+# - Scoped filesystem grants (read/write to your workspace only)
+# - Grouped AST tools for code analysis
+# - Network access for web search
+# - Human-in-the-loop confirm gates on dangerous operations
+#
+# Hot reload: edit this file while the server is running — changes take
+# effect immediately if the config is valid.
+
+# ── Server ─────────────────────────────────────────────────────────────────────
+
+[server]
+host          = "127.0.0.1"
+port          = 3000
+transport     = "stdio"
+server_secret = "{server_secret}"
+dev_mode      = false
+
+[server.http]
+cors_origins        = ["http://localhost:*"]
+on_disconnect       = "kill"
+reattach_grace_secs = 30
+
+# ── Tools ──────────────────────────────────────────────────────────────────────
+
+[tools]
+dir = "./tools"
+
+# ── Sandbox ────────────────────────────────────────────────────────────────────
+
+[sandbox]
+enabled      = true
+strategy     = "auto"
+env_baseline = ["PATH", "SYSTEMROOT", "COMSPEC", "TERM", "LANG", "HOME"]
+
+# ── Audit ──────────────────────────────────────────────────────────────────────
+
+[audit]
+enabled = true
+output  = "file"
+path    = "audit.log"
+
+# ── Safety Rails ───────────────────────────────────────────────────────────────
+
+[limits]
+max_invocations_per_minute = 120
+max_concurrent_tools       = 8
+tool_timeout_secs          = 30
+max_output_bytes           = 2097152   # 2 MiB — generous for AST output
+
+# ── UI ─────────────────────────────────────────────────────────────────────────
+
+[ui]
+port      = 9765
+auto_open = "confirm"
+
+[ui.auth]
+pin = ""
+
+[ui.confirm]
+timeout_secs                     = 60
+session_approval_options         = [5, 30, 0]
+session_approval_inactivity_secs = 300
+
+[ui.theme]
+preset = "dark"
+
+# ── Key: coding_agent ──────────────────────────────────────────────────────────
+#
+# A production-style key with scoped grants. Demonstrates:
+# - Tool access via wildcard (grant all tools)
+# - Filesystem scoped to a specific workspace
+# - Network access for web search
+# - Deny rules to protect sensitive paths
+# - Commented confirm gate examples
+
+[keys.coding_agent]
+token = "{agent_token}"
+
+# Grant access to all registered tools.
+[[keys.coding_agent.rules]]
+effect = "grant"
+type   = "tool"
+name   = "*"
+
+# Read/write access scoped to the workspace directory.
+[[keys.coding_agent.rules]]
+effect = "grant"
+type   = "filesystem"
+path   = "{workspace}/**"
+perm   = "rw"
+
+# Network access for web_search tool.
+[[keys.coding_agent.rules]]
+effect = "grant"
+type   = "network"
+host   = "*"
+perm   = "r"
+
+# ── Deny rules (defense in depth) ─────────────────────────────────────────────
+# Deny always wins over grant. Use these to carve out sensitive paths.
+
+# Protect .git internals from writes (agent can still read).
+[[keys.coding_agent.rules]]
+effect = "deny"
+type   = "filesystem"
+path   = "{workspace}/.git/**"
+perm   = "w"
+
+# ── Commented examples ────────────────────────────────────────────────────────
+#
+# Require human confirmation for destructive operations:
+# [[keys.coding_agent.rules]]
+# effect  = "grant"
+# type    = "filesystem"
+# path    = "{workspace}/config/**"
+# perm    = "w"
+# confirm = true
+#
+# Environment variable injection (e.g., for API keys):
+# [[keys.coding_agent.rules]]
+# effect      = "grant"
+# type        = "environment"
+# var_pattern = "OPENAI_API_KEY"
+# value       = "sk-..."
 "##
     )
 }
+
+/// System prompt for the demo setup.
+const DEMO_SYSTEM_PROMPT: &str = r#"# Pansophical Coding Agent
+
+You are a coding assistant with access to powerful AST analysis tools and web search.
+
+## Available Tools
+
+### AST Analysis (group: ast)
+- **ast_map** — Outline file/directory structure with signatures and line numbers
+- **ast_show** — Extract the full source code of a specific symbol
+- **ast_digest** — Compact one-page overview of a module
+- **ast_search** — Semantic + BM25 search across the codebase
+- **ast_callees** — Forward call graph: what does a function call?
+- **ast_callers** — Reverse call graph: who calls this function?
+- **ast_implements** — Find all implementations of a trait/interface
+- **ast_reverse_deps** — Which files import this file?
+
+### Web Search
+- **ext_web_search** — Search the web via DuckDuckGo
+
+### Built-in File Operations
+- **builtin_read_file** — Read file contents
+- **builtin_write_file** — Write/create files
+- **builtin_list_dir** — List directory contents
+- **builtin_search_files** — Grep/regex search
+- **builtin_file_info** — File metadata
+- **builtin_move_file** — Move/rename files
+- **builtin_delete_file** — Delete files
+- **builtin_create_directory** — Create directories
+- **builtin_request_access** — Request elevated access from admin
+
+## Workflow
+
+1. Start with `ast_digest` or `ast_map` to understand the codebase structure
+2. Use `ast_search` to find relevant code by concept
+3. Drill into specific symbols with `ast_show`
+4. Trace dependencies with `ast_callers` / `ast_callees`
+5. Use `builtin_read_file` / `builtin_write_file` for edits
+6. Use `ext_web_search` when you need external information
+
+Be precise with file paths — always use absolute paths.
+"#;
+
 
 /// Build a canonical version string for logs and protocol responses.
 ///
