@@ -1,6 +1,6 @@
 [package]
 name = "pansophical"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Security-first MCP server with intersection-based authorization"
 license = "MIT"
