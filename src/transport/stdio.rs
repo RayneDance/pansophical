@@ -391,7 +391,7 @@ async fn handle_tools_call(
                 execute_tool(id, tool, &arguments, config, audit, session, tool_name, &env_grants),
             ).await
         }
-        AuthzDecision::Denied { explain } => {
+        AuthzDecision::Denied { denied_list, explain } => {
             // ── Check ephemeral grants (from request_access approvals) ────
             // The approval cache may contain grants from admin-approved
             // request_access calls. Check if all NON-TOOL access requests
@@ -468,11 +468,21 @@ async fn handle_tools_call(
                 ).await;
             }
 
+            // Build a human-readable denial message that tells the LLM
+            // exactly which resources were denied and why.
+            let denied_summary: Vec<String> = denied_list.iter().map(|d| {
+                format!("{:?}:{} ({})", d.target_type, d.resource, d.reason)
+            }).collect();
+            let denial_msg = format!(
+                "authorization denied — {}",
+                denied_summary.join("; ")
+            );
+
             // No ephemeral grants — deny as normal.
             let detail = if let Some(ref diff) = explain {
                 serde_json::to_string(diff).unwrap_or_default()
             } else {
-                "denied".to_string()
+                denial_msg.clone()
             };
 
             audit.log(
@@ -484,7 +494,7 @@ async fn handle_tools_call(
 
             if let Some(diff) = explain {
                 serde_json::to_value(
-                    JsonRpcError::new(id, error_codes::UNAUTHORIZED, "authorization denied")
+                    JsonRpcError::new(id, error_codes::UNAUTHORIZED, &denial_msg)
                         .with_data(serde_json::to_value(diff).unwrap()),
                 )
                 .unwrap()
@@ -492,7 +502,7 @@ async fn handle_tools_call(
                 serde_json::to_value(JsonRpcError::new(
                     id,
                     error_codes::UNAUTHORIZED,
-                    "authorization denied",
+                    &denial_msg,
                 ))
                 .unwrap()
             }

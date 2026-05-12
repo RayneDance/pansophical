@@ -475,11 +475,19 @@ async fn handle_tools_call_http(
                 execute_tool_http(id, tool, &arguments, config, audit, session, tool_name, &env_grants),
             ).await
         }
-        AuthzDecision::Denied { explain } => {
+        AuthzDecision::Denied { denied_list, explain } => {
+            let denied_summary: Vec<String> = denied_list.iter().map(|d| {
+                format!("{:?}:{} ({})", d.target_type, d.resource, d.reason)
+            }).collect();
+            let denial_msg = format!(
+                "authorization denied — {}",
+                denied_summary.join("; ")
+            );
+
             let detail = if let Some(ref diff) = explain {
                 serde_json::to_string(diff).unwrap_or_default()
             } else {
-                "denied".to_string()
+                denial_msg.clone()
             };
 
             audit.log(
@@ -491,7 +499,7 @@ async fn handle_tools_call_http(
 
             if let Some(diff) = explain {
                 serde_json::to_value(
-                    JsonRpcError::new(id, error_codes::UNAUTHORIZED, "authorization denied")
+                    JsonRpcError::new(id, error_codes::UNAUTHORIZED, &denial_msg)
                         .with_data(serde_json::to_value(diff).unwrap()),
                 )
                 .unwrap()
@@ -499,7 +507,7 @@ async fn handle_tools_call_http(
                 serde_json::to_value(JsonRpcError::new(
                     id,
                     error_codes::UNAUTHORIZED,
-                    "authorization denied",
+                    &denial_msg,
                 ))
                 .unwrap()
             }

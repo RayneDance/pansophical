@@ -301,7 +301,7 @@ fn explain_mode_returns_diff_on_denial() {
     ];
 
     match evaluate(&requests, &key, true) {
-        AuthzDecision::Denied { explain } => {
+        AuthzDecision::Denied { explain, .. } => {
             let diff = explain.expect("explain should be Some in dev_mode");
             assert_eq!(diff.denied.len(), 1);
             assert_eq!(diff.denied[0].resource, "/etc/hosts");
@@ -322,7 +322,7 @@ fn no_explain_in_production_mode() {
     ];
 
     match evaluate(&requests, &key, false) {
-        AuthzDecision::Denied { explain } => {
+        AuthzDecision::Denied { explain, .. } => {
             assert!(explain.is_none(), "explain should be None when dev_mode=false");
         }
         AuthzDecision::Granted { .. } => panic!("should be denied"),
@@ -364,7 +364,7 @@ fn partial_denial_denies_all() {
     ];
 
     match evaluate(&requests, &key, true) {
-        AuthzDecision::Denied { explain } => {
+        AuthzDecision::Denied { explain, .. } => {
             let diff = explain.unwrap();
             assert_eq!(diff.denied.len(), 1);
             assert_eq!(diff.granted.len(), 1);

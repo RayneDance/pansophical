@@ -122,7 +122,9 @@ pub enum AuthzDecision {
     },
     /// One or more requests denied.
     Denied {
-        /// Only populated when `dev_mode = true`.
+        /// The specific resources that were denied (always populated).
+        denied_list: Vec<DeniedRequest>,
+        /// Full policy diff — only populated when `dev_mode = true`.
         explain: Option<PolicyDiff>,
     },
 }
@@ -174,12 +176,12 @@ pub fn evaluate(
             Some(PolicyDiff {
                 requested: requests.to_vec(),
                 granted: granted_list,
-                denied: denied_list,
+                denied: denied_list.clone(),
             })
         } else {
             None
         };
-        return AuthzDecision::Denied { explain };
+        return AuthzDecision::Denied { denied_list, explain };
     }
 
     AuthzDecision::Granted {
