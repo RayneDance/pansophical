@@ -1,6 +1,6 @@
 # AppContainer ACL Implementation — Completed
 
-> **Status:** ✅ Implemented — All phases complete, 87 tests passing, zero warnings.
+> **Status:** ✅ Implemented and hardened — session-scoped pooling, handle-based ACEs, ACE existence checks, env block fixes.
 
 ## Architecture Overview
 
@@ -46,6 +46,7 @@ Replaced `icacls.exe` process spawning with direct Win32 API calls:
 - **`FindFirstFileW` / `FindNextFileW`** — native directory enumeration
 - **`FILE_FLAG_OPEN_REPARSE_POINT`** — no symlink/junction following
 - **`GetFileInformationByHandle`** — hardlink detection (`nNumberOfLinks > 1`)
+- **ACE existence check** — before calling `SetSecurityInfo`, scans existing ACEs for the SID. If an adequate ACE already exists, skips the call entirely. This avoids the 50+ second `SetSecurityInfo` penalty on drive roots.
 - **Configurable skip list** — skips `target/`, `node_modules/`, `.git/`, etc.
 
 ### Phase 3: Key Context Propagation
@@ -70,6 +71,9 @@ Replaced `icacls.exe` process spawning with direct Win32 API calls:
 | Hardlink safety | Not checked | Detected + skipped |
 | Crash recovery | None (UUID orphans) | State file + PID check |
 | Process isolation | Job Object | Job Object (unchanged) |
+| Drive root ACL perf | 50+ seconds per call | 0ms (ACE existence check) |
+| Child env block | Missing system vars | 14 critical vars always included |
+| Denial messages | Opaque "denied" | Resource type + reason included |
 
 ## Files Modified
 
