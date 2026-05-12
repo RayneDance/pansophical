@@ -5,6 +5,10 @@ edition = "2024"
 description = "Security-first MCP server with intersection-based authorization"
 license = "MIT"
 
+[features]
+default = ["demo"]
+demo    = []           # --demo flag + embedded tool definitions (~20 KiB)
+
 [dependencies]
 # Async runtime
 tokio          = { version = "1", features = ["full"] }

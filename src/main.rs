@@ -31,6 +31,7 @@ struct Cli {
     init: bool,
 
     /// Set up a full demo environment with AST tools, scoped key, and system prompt.
+    #[cfg(feature = "demo")]
     #[arg(long)]
     demo: bool,
 
@@ -54,8 +55,16 @@ fn main() {
 
     let result = if cli.init {
         run_init(&cli.config)
-    } else if cli.demo {
-        run_demo(&cli.config)
+    } else if {
+        #[cfg(feature = "demo")]
+        { cli.demo }
+        #[cfg(not(feature = "demo"))]
+        { false }
+    } {
+        #[cfg(feature = "demo")]
+        { run_demo(&cli.config) }
+        #[cfg(not(feature = "demo"))]
+        { unreachable!() }
     } else if cli.check {
         run_check(&cli.config)
     } else {
@@ -102,6 +111,7 @@ fn run_init(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "demo")]
 /// `--demo`: Set up a full demo environment showcasing best practices.
 ///
 /// Creates:
@@ -169,6 +179,7 @@ fn generate_secrets() -> (String, String) {
     (server_secret, token)
 }
 
+#[cfg(feature = "demo")]
 /// Write demo tool definitions — AST tools + web search.
 fn write_demo_tools(tools_dir: &Path) -> Result<()> {
     let tools: &[(&str, &str)] = &[
@@ -611,6 +622,7 @@ var_pattern = "HOSTNAME"
     )
 }
 
+#[cfg(feature = "demo")]
 /// Generate a demo config.toml with scoped grants and AST tool showcase.
 fn generate_demo_config(server_secret: &str, agent_token: &str, workspace: &str) -> String {
     format!(
@@ -747,6 +759,7 @@ perm   = "w"
     )
 }
 
+#[cfg(feature = "demo")]
 /// System prompt for the demo setup.
 const DEMO_SYSTEM_PROMPT: &str = r#"# Pansophical Coding Agent
 
