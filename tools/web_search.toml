@@ -5,7 +5,8 @@
 # Returns lightweight HTML with result titles, URLs, and snippets
 # that are easy for an AI agent to parse.
 #
-# Uses curl.exe (not the PowerShell alias) with -A for user-agent.
+# Uses --data-urlencode so queries with spaces/special chars work.
+# Uses --get to convert POST-style encoding into a GET request.
 #
 # Requires a network grant in the key's policy rules.
 
@@ -16,7 +17,9 @@ args            = [
     "-s", "-L",
     "--max-time", "10",
     "-A", "Mozilla/5.0 (compatible; Pansophical/1.0)",
-    "https://lite.duckduckgo.com/lite/?q={query}",
+    "--get",
+    "--data-urlencode", "q={query}",
+    "https://lite.duckduckgo.com/lite/",
 ]
 allow_shell     = false
 arg_passthrough = false
