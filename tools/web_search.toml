@@ -1,22 +1,22 @@
 # ══════════════════════════════════════════════════════════════════
-# Google Search
+# Web Search (DuckDuckGo)
 # ══════════════════════════════════════════════════════════════════
-# Performs a web search via Google and returns results as HTML.
-# The AI agent can parse the response for links and summaries.
+# Performs a web search via DuckDuckGo's lite (HTML) endpoint.
+# Returns lightweight HTML with result titles, URLs, and snippets
+# that are easy for an AI agent to parse.
 #
-# Uses curl to fetch Google search results with a plain user-agent
-# so Google returns a lightweight HTML page.
+# Uses curl.exe (not the PowerShell alias) with -A for user-agent.
 #
 # Requires a network grant in the key's policy rules.
 
-name            = "google_search"
-description     = "Search Google for a query and return the results page. The response is HTML containing search result titles, URLs, and snippets. Parse the output to extract relevant information."
-command         = "curl"
+name            = "web_search"
+description     = "Search the web for a query using DuckDuckGo. Returns an HTML page with search result titles, URLs, and text snippets. Parse the 'result-link' class anchors for titles and hrefs."
+command         = "curl.exe"
 args            = [
     "-s", "-L",
     "--max-time", "10",
-    "-H", "User-Agent: Mozilla/5.0 (compatible; Pansophical/1.0)",
-    "https://www.google.com/search?q={query}&num=10&hl=en",
+    "-A", "Mozilla/5.0 (compatible; Pansophical/1.0)",
+    "https://lite.duckduckgo.com/lite/?q={query}",
 ]
 allow_shell     = false
 arg_passthrough = false
