@@ -452,6 +452,14 @@ async fn handle_tools_call(
                 // Augment the sandbox profile with ephemeral grant paths.
                 // Without this, the AppContainer denies access at the OS level
                 // even though the authz cache approved the resource.
+                //
+                // SECURITY NOTE: capabilities (e.g. internetClient) are applied
+                // per-process at CreateProcessW time. Once a child is spawned
+                // with a capability, it persists for the process's lifetime —
+                // even if the ephemeral grant expires mid-execution. This is
+                // acceptable because tool_timeout_secs bounds the exposure
+                // window (default: 30s). The authz layer prevents NEW spawns
+                // after grant expiry.
                 for req in &resource_requests {
                     match req.target_type {
                         crate::config::policy_target::PolicyTargetType::Network => {

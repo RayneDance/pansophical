@@ -241,6 +241,15 @@ Agent request
 
 Both platforms: Job Object / `PR_SET_PDEATHSIG` kills children if the server dies. Environment is stripped to `env_baseline` only.
 
+**Ephemeral grant lifecycle:**
+
+Ephemeral grants (via `builtin_request_access`) allow admin-approved access to resources not covered by static policy. Important security considerations:
+
+- **Capabilities are per-process.** When an ephemeral network grant is approved, the spawned child process receives the `internetClient` capability via `CreateProcessW`. This capability persists for the process's entire lifetime — it cannot be revoked mid-execution.
+- **Grant expiry does not kill running processes.** If an ephemeral grant expires while a tool process is still running, that process retains its capabilities until exit. However, the next tool call will be denied at the authz layer since the cache entry has expired.
+- **Exposure is bounded by `tool_timeout_secs`.** The reaper enforces a hard kill timeout (default: 30 seconds) on all child processes. This limits the window during which a process can operate after its grant expires.
+- **Container reuse is safe.** The AppContainer pool reuses container profiles (SIDs) across tool calls, but capabilities are applied per-spawn, not per-container. A container that spawned a network-capable process can later spawn a non-network process — each gets its own `SecurityCapabilities`.
+
 ### Builtin vs script tool execution
 
 | | Builtin tools | Script tools |
